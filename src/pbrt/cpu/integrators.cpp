@@ -4,6 +4,10 @@
 
 #include <pbrt/cpu/integrators.h>
 
+#ifdef PBRT_NRC_ENABLED
+#include <nrc/nrc_integrator.h>
+#endif
+
 #include <pbrt/bsdf.h>
 #include <pbrt/bssrdf.h>
 #include <pbrt/cameras.h>
@@ -3682,6 +3686,11 @@ std::unique_ptr<Integrator> Integrator::Create(
     else if (name == "sppm")
         integrator = SPPMIntegrator::Create(parameters, colorSpace, camera, sampler,
                                             aggregate, lights, loc);
+#ifdef PBRT_NRC_ENABLED
+    else if (name == "nrcpath")
+        integrator = NRCPathIntegrator::Create(parameters, camera, sampler,
+                                               aggregate, lights, loc);
+#endif
     else
         ErrorExit(loc, "%s: integrator type unknown.", name);
 

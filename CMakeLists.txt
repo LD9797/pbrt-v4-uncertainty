@@ -1156,15 +1156,45 @@ install (TARGETS
 
 add_subdirectory(external/tiny-cuda-nn EXCLUDE_FROM_ALL)
 
+# ── Standalone milestone-1 test (unchanged) ───────────────────────────────────
 add_executable(nrc_milestone1
     src/nrc/milestone1.cu
 )
-
 target_link_libraries(nrc_milestone1 PRIVATE tiny-cuda-nn)
-
 target_compile_features(nrc_milestone1 PRIVATE cxx_std_17 cuda_std_17)
+set_target_properties(nrc_milestone1 PROPERTIES CUDA_ARCHITECTURES 86)
 
-# RTX 3090 / RTX 3070 = sm_86
-set_target_properties(nrc_milestone1 PROPERTIES
-    CUDA_ARCHITECTURES 86
-)
+# ── nrc_lib — CUDA-backed trainer + integrator ────────────────────────────────
+# Only built when CUDA is available (same guard as the rest of the GPU code).
+if (PBRT_CUDA_ENABLED)
+    add_library(nrc_lib STATIC
+        src/nrc/nrc.cpp
+        src/nrc/nrc_trainer.cu
+        src/nrc/nrc_integrator.cpp
+    )
+
+    target_include_directories(nrc_lib PUBLIC
+        src          # allows <pbrt/...> includes
+        src/nrc      # allows <nrc/...> includes
+    )
+
+    # Pull in tiny-cuda-nn headers + lib.
+    target_link_libraries(nrc_lib PUBLIC pbrt_lib tiny-cuda-nn)
+
+    target_compile_features(nrc_lib PUBLIC cxx_std_17 cuda_std_17)
+
+    # Match the GPU architecture used throughout the rest of the project.
+    set_target_properties(nrc_lib PROPERTIES
+        CUDA_ARCHITECTURES       ${CMAKE_CUDA_ARCHITECTURES}
+        CUDA_SEPARABLE_COMPILATION ON
+    )
+
+    # Make nrc_lib available to the main pbrt executable.
+    # Note: pbrt_exe is already defined above so we link it explicitly here
+    # rather than via ALL_PBRT_LIBS (which was evaluated before nrc_lib existed).
+    target_link_libraries(pbrt_exe PRIVATE nrc_lib)
+    target_link_libraries(pbrt_test PRIVATE nrc_lib)
+
+    # Preprocessor flag so integrators.cpp can #ifdef-guard the factory entry.
+    target_compile_definitions(pbrt_lib PUBLIC PBRT_NRC_ENABLED)
+endif()
