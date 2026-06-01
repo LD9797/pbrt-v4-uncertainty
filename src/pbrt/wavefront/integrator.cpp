@@ -39,6 +39,9 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #endif  // PBRT_BUILD_GPU_RENDERER
+#ifdef PBRT_BUILD_NRC
+#include <nrc/nrc.h>
+#endif  // PBRT_BUILD_NRC
 
 namespace pbrt {
 
@@ -80,6 +83,13 @@ static void updateMaterialNeeds(
 WavefrontPathIntegrator::WavefrontPathIntegrator(
     pstd::pmr::memory_resource *memoryResource, BasicScene &scene)
     : memoryResource(memoryResource), exitCopyThread(new std::atomic<bool>(false)) {
+
+    #ifdef PBRT_BUILD_NRC   
+    if (Options->useGPU) {
+        InitializeNRC();
+    }
+    #endif
+
     ThreadLocal<Allocator> threadAllocators(
         [memoryResource]() { return Allocator(memoryResource); });
 
@@ -771,5 +781,29 @@ void WavefrontPathIntegrator::UpdateFramebufferFromFilm(Bounds2i pixelBounds,
             rgb[index] = exposure * film.GetPixelRGB(p + film.PixelBounds().pMin);
         });
 }
+
+#ifdef PBRT_BUILD_NRC
+void WavefrontPathIntegrator::InitializeNRC() {
+    if (!Options->useGPU)
+        return;
+
+    if (nrcCache != nullptr)
+        return;
+
+    nrcBatchSize = nrc::NeuralRadianceCache::RoundUpBatch(maxQueueSize);
+
+    nrcCache = new nrc::NeuralRadianceCache(
+        nrcBatchSize,
+        kNRCInputDims,
+        kNRCOutputDims
+    );
+
+    LOG_VERBOSE("NRC initialized: batchSize=%d, inputDims=%d, outputDims=%d, params=%zu",
+                nrcBatchSize,
+                kNRCInputDims,
+                kNRCOutputDims,
+                nrcCache->NumParams());
+}
+#endif
 
 }  // namespace pbrt

@@ -25,6 +25,12 @@
 
 namespace pbrt {
 
+#ifdef PBRT_BUILD_NRC
+namespace nrc {
+class NeuralRadianceCache;
+}
+#endif
+
 class BasicScene;
 class GUI;
 
@@ -57,6 +63,17 @@ class WavefrontAggregate {
 class WavefrontPathIntegrator {
   public:
     // WavefrontPathIntegrator Public Methods
+
+    #ifdef PBRT_BUILD_NRC
+    static constexpr uint32_t kNRCInputDims = 16;
+    static constexpr uint32_t kNRCOutputDims = 3;
+
+    uint32_t nrcBatchSize = 0;
+    nrc::NeuralRadianceCache *nrcCache = nullptr;
+
+    void InitializeNRC();
+    #endif
+
     Float Render();
 
     void GenerateCameraRays(int y0, Transform movingFromcamera, int sampleIndex);
