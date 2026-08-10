@@ -152,9 +152,9 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
             if (w.depth == 0 && nrcInputs != nullptr) {
                 Point3f p(w.pi);
                 float *row = nrcInputs + size_t(w.pixelIndex) * kNRCInputDims;
-                row[0] = float(p.x);
-                row[1] = float(p.y);
-                row[2] = float(p.z);
+                row[0] = 2.f * ((p.x - nrcSceneBounds.pMin.x) / (nrcSceneBounds.pMax.x - nrcSceneBounds.pMin.x)) - 1.f;
+                row[1] = 2.f * ((p.y - nrcSceneBounds.pMin.y) / (nrcSceneBounds.pMax.y - nrcSceneBounds.pMin.y)) - 1.f;
+                row[2] = 2.f * ((p.z - nrcSceneBounds.pMin.z) / (nrcSceneBounds.pMax.z - nrcSceneBounds.pMin.z)) - 1.f;
                 row[3] = float(w.wo.x);
                 row[4] = float(w.wo.y);
                 row[5] = float(w.wo.z);

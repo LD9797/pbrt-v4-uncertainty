@@ -296,6 +296,7 @@ WavefrontPathIntegrator::WavefrontPathIntegrator(
     // the per-pass pixel batch.
     if (Options->useGPU) {
         nrcBatchSize = nrc::NeuralRadianceCache::RoundUpBatch(maxQueueSize);
+        nrcSceneBounds = aggregate->Bounds();
         cudaMallocManaged(&nrcInputs,
                           sizeof(float) * kNRCInputDims * nrcBatchSize);
         cudaMallocManaged(&nrcTargets,

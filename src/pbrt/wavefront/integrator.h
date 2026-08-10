@@ -207,6 +207,7 @@ class WavefrontPathIntegrator {
     static constexpr uint32_t kNRCInputDims = 16;
     static constexpr uint32_t kNRCOutputDims = 3;
     uint32_t nrcBatchSize = 0;  // = NeuralRadianceCache::RoundUpBatch(maxQueueSize)
+    Bounds3f nrcSceneBounds;        // set from aggregate->Bounds() at init; used to normalize pos to [-1,1]
     float *nrcInputs = nullptr;
     float *nrcTargets = nullptr;
     uint8_t *nrcValid = nullptr;
