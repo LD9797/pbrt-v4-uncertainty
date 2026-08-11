@@ -63,12 +63,13 @@ size_t NeuralRadianceCache::NumParams() const {
 }
 
 float NeuralRadianceCache::Train(const float *dInputs, const float *dTargets) {
-    // tcnn::GPUMatrix non-owning view over caller-provided device memory.
-    tcnn::GPUMatrix<float> inputs(const_cast<float *>(dInputs), nInputDims,
-                                  batchSize);
-    tcnn::GPUMatrix<float> targets(const_cast<float *>(dTargets), nOutputDims,
-                                   batchSize);
+    return TrainN(dInputs, dTargets, batchSize);
+}
 
+float NeuralRadianceCache::TrainN(const float *dInputs, const float *dTargets,
+                                   uint32_t n) {
+    tcnn::GPUMatrix<float> inputs(const_cast<float *>(dInputs), nInputDims, n);
+    tcnn::GPUMatrix<float> targets(const_cast<float *>(dTargets), nOutputDims, n);
     auto ctx = impl->model.trainer->training_step(inputs, targets);
     impl->lastLoss = impl->model.trainer->loss(*ctx);
     return impl->lastLoss;

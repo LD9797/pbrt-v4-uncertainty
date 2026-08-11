@@ -38,8 +38,12 @@ class NeuralRadianceCache {
     NeuralRadianceCache(const NeuralRadianceCache &) = delete;
     NeuralRadianceCache &operator=(const NeuralRadianceCache &) = delete;
 
-    // One training step. Returns the (post-step) loss reported by tcnn.
+    // One training step over the full batchSize. Returns the loss.
     float Train(const float *dInputs, const float *dTargets);
+
+    // Training step over only the first n samples (n must be a valid tcnn
+    // batch size — use RoundUpBatch). Use this to skip zero-padded slots.
+    float TrainN(const float *dInputs, const float *dTargets, uint32_t n);
 
     // Forward pass only. Writes nOutputDims*batchSize floats into dOutputs.
     void Inference(const float *dInputs, float *dOutputs);

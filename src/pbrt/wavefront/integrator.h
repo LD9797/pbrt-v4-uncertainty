@@ -211,6 +211,8 @@ class WavefrontPathIntegrator {
     float *nrcInputs = nullptr;
     float *nrcTargets = nullptr;
     uint8_t *nrcValid = nullptr;
+    float *nrcCompactInputs  = nullptr;  // valid-only training inputs, compacted each pass
+    float *nrcCompactTargets = nullptr;  // valid-only training targets, compacted each pass
     float *nrcInferenceOutputs = nullptr;  // scratch for per-step inference
     // Persistent per-pixel predicted RGB image (sized to film resolution).
     // Populated by per-sample inference passes; written to EXR at end of Render().

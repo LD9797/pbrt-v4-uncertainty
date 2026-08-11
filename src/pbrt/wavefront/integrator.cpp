@@ -307,6 +307,10 @@ WavefrontPathIntegrator::WavefrontPathIntegrator(
         cudaMemset(nrcTargets, 0,
                    sizeof(float) * kNRCOutputDims * nrcBatchSize);
         cudaMemset(nrcValid, 0, sizeof(uint8_t) * nrcBatchSize);
+        cudaMallocManaged(&nrcCompactInputs,
+                          sizeof(float) * kNRCInputDims * nrcBatchSize);
+        cudaMallocManaged(&nrcCompactTargets,
+                          sizeof(float) * kNRCOutputDims * nrcBatchSize);
         cudaMallocManaged(&nrcInferenceOutputs,
                           sizeof(float) * kNRCOutputDims * nrcBatchSize);
         cudaMemset(nrcInferenceOutputs, 0,
@@ -864,11 +868,41 @@ void WavefrontPathIntegrator::NRCTrainAndInferStep() {
     // capture in UpdateFilm) are visible before tcnn reads the buffers.
     cudaDeviceSynchronize();
 
-    // One Adam/L2 training step over the entire padded batch. Invalid slots
-    // contribute (zero-input -> zero-target) pairs which act as mild
-    // regularization toward 0. For a preliminary milestone this is fine; a
-    // future revision should compact valid samples first.
-    nrcLastLoss = nrcCache->Train(nrcInputs, nrcTargets);
+    // One Adam/L2 training step over valid samples only. Compact them into a
+    // contiguous prefix first so tcnn never sees the zero-padded invalid slots.
+    uint32_t nValid = 0;
+    for (uint32_t i = 0; i < nrcBatchSize; ++i) {
+        if (!nrcValid[i]) continue;
+        std::memcpy(nrcCompactInputs  + nValid * kNRCInputDims,
+                    nrcInputs          + i      * kNRCInputDims,
+                    kNRCInputDims * sizeof(float));
+        std::memcpy(nrcCompactTargets + nValid * kNRCOutputDims,
+                    nrcTargets         + i      * kNRCOutputDims,
+                    kNRCOutputDims * sizeof(float));
+        ++nValid;
+    }
+    if (nValid > 0) {
+        uint32_t trainBatch = nrc::NeuralRadianceCache::RoundUpBatch(nValid);
+        // Zero-pad the rounded tail so tcnn sees clean zeros, not stale data.
+        if (trainBatch > nValid) {
+            std::memset(nrcCompactInputs  + nValid * kNRCInputDims,  0,
+                        (trainBatch - nValid) * kNRCInputDims  * sizeof(float));
+            std::memset(nrcCompactTargets + nValid * kNRCOutputDims, 0,
+                        (trainBatch - nValid) * kNRCOutputDims * sizeof(float));
+        }
+        nrcLastLoss = nrcCache->TrainN(nrcCompactInputs, nrcCompactTargets, trainBatch);
+    }
+    if (nValid > 0) {
+        uint32_t trainBatch = nrc::NeuralRadianceCache::RoundUpBatch(nValid);
+        // Zero-pad the rounded tail so tcnn sees clean zeros, not stale data.
+        if (trainBatch > nValid) {
+            std::memset(nrcCompactInputs  + nValid * kNRCInputDims,  0,
+                        (trainBatch - nValid) * kNRCInputDims  * sizeof(float));
+            std::memset(nrcCompactTargets + nValid * kNRCOutputDims, 0,
+                        (trainBatch - nValid) * kNRCOutputDims * sizeof(float));
+        }
+        nrcLastLoss = nrcCache->TrainN(nrcCompactInputs, nrcCompactTargets, trainBatch);
+    }
 
     // Inference pass over the same inputs, writing predicted RGB back into
     // the persistent per-pixel framebuffer for whichever pixels were touched
