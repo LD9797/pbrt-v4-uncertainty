@@ -876,32 +876,26 @@ void WavefrontPathIntegrator::NRCTrainAndInferStep() {
         std::memcpy(nrcCompactInputs  + nValid * kNRCInputDims,
                     nrcInputs          + i      * kNRCInputDims,
                     kNRCInputDims * sizeof(float));
-        std::memcpy(nrcCompactTargets + nValid * kNRCOutputDims,
-                    nrcTargets         + i      * kNRCOutputDims,
-                    kNRCOutputDims * sizeof(float));
+        float *dst = nrcCompactTargets + nValid * kNRCOutputDims;
+        const float *src = nrcTargets   + i      * kNRCOutputDims;
+        for (uint32_t c = 0; c < kNRCOutputDims; ++c)
+            dst[c] = std::log1p(src[c]);
         ++nValid;
     }
-    if (nValid > 0) {
-        uint32_t trainBatch = nrc::NeuralRadianceCache::RoundUpBatch(nValid);
-        // Zero-pad the rounded tail so tcnn sees clean zeros, not stale data.
-        if (trainBatch > nValid) {
-            std::memset(nrcCompactInputs  + nValid * kNRCInputDims,  0,
-                        (trainBatch - nValid) * kNRCInputDims  * sizeof(float));
-            std::memset(nrcCompactTargets + nValid * kNRCOutputDims, 0,
-                        (trainBatch - nValid) * kNRCOutputDims * sizeof(float));
+
+    for (int step = 0; step < 2; ++step) {
+        if (nValid > 0) {
+            uint32_t trainBatch = nrc::NeuralRadianceCache::RoundUpBatch(nValid);
+            // Zero-pad the rounded tail so tcnn sees clean zeros, not stale data.
+            if (trainBatch > nValid) {
+                std::memset(nrcCompactInputs + nValid * kNRCInputDims, 0,
+                            (trainBatch - nValid) * kNRCInputDims * sizeof(float));
+                std::memset(nrcCompactTargets + nValid * kNRCOutputDims, 0,
+                            (trainBatch - nValid) * kNRCOutputDims * sizeof(float));
+            }
+            nrcLastLoss =
+                nrcCache->TrainN(nrcCompactInputs, nrcCompactTargets, trainBatch);
         }
-        nrcLastLoss = nrcCache->TrainN(nrcCompactInputs, nrcCompactTargets, trainBatch);
-    }
-    if (nValid > 0) {
-        uint32_t trainBatch = nrc::NeuralRadianceCache::RoundUpBatch(nValid);
-        // Zero-pad the rounded tail so tcnn sees clean zeros, not stale data.
-        if (trainBatch > nValid) {
-            std::memset(nrcCompactInputs  + nValid * kNRCInputDims,  0,
-                        (trainBatch - nValid) * kNRCInputDims  * sizeof(float));
-            std::memset(nrcCompactTargets + nValid * kNRCOutputDims, 0,
-                        (trainBatch - nValid) * kNRCOutputDims * sizeof(float));
-        }
-        nrcLastLoss = nrcCache->TrainN(nrcCompactInputs, nrcCompactTargets, trainBatch);
     }
 
     // Inference pass over the same inputs, writing predicted RGB back into
@@ -930,9 +924,9 @@ void WavefrontPathIntegrator::NRCTrainAndInferStep() {
             if (x < 0 || y < 0 || x >= res.x || y >= res.y)
                 return;
             int pix = y * res.x + x;
-            predImg[pix * 3 + 0] = outputs[i * (int)kNRCOutputDims + 0];
-            predImg[pix * 3 + 1] = outputs[i * (int)kNRCOutputDims + 1];
-            predImg[pix * 3 + 2] = outputs[i * (int)kNRCOutputDims + 2];
+            predImg[pix * 3 + 0] = std::expm1(outputs[i * (int)kNRCOutputDims + 0]);
+            predImg[pix * 3 + 1] = std::expm1(outputs[i * (int)kNRCOutputDims + 1]);
+            predImg[pix * 3 + 2] = std::expm1(outputs[i * (int)kNRCOutputDims + 2]);
         });
 
     ++nrcSampleCounter;

@@ -145,25 +145,80 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                 bsdf.Regularize();
 
 #ifdef PBRT_BUILD_NRC
-            // NRC milestone 2: capture first-hit (pos, dir) feature vector.
+            // NRC milestone 2: capture first-hit feature vector (all 15 used dims).
             // Inputs are stored column-major: kNRCInputDims floats per slot,
-            // pixelIndex==slot. Only the first 6 dims are populated; the
-            // remaining (16-6=10) were pre-zeroed in NRCResetSampleBuffers.
+            // pixelIndex==slot. Dim 15 is pre-zeroed in NRCResetSampleBuffers.
             if (w.depth == 0 && nrcInputs != nullptr) {
+                // Albedo: hemispherical-directional reflectance (shared with VisibleSurface below).
+                constexpr int nRhoSamples = 16;
+                const Float ucRho[nRhoSamples] = {
+                    0.75741637, 0.37870818, 0.7083487, 0.18935409, 0.9149363, 0.35417435,
+                    0.5990858,  0.09467703, 0.8578725, 0.45746812, 0.686759,  0.17708716,
+                    0.9674518,  0.2995429,  0.5083201, 0.047338516};
+                const Point2f uRho[nRhoSamples] = {
+                    Point2f(0.855985, 0.570367), Point2f(0.381823, 0.851844),
+                    Point2f(0.285328, 0.764262), Point2f(0.733380, 0.114073),
+                    Point2f(0.542663, 0.344465), Point2f(0.127274, 0.414848),
+                    Point2f(0.964700, 0.947162), Point2f(0.594089, 0.643463),
+                    Point2f(0.095109, 0.170369), Point2f(0.825444, 0.263359),
+                    Point2f(0.429467, 0.454469), Point2f(0.244460, 0.816459),
+                    Point2f(0.756135, 0.731258), Point2f(0.516165, 0.152852),
+                    Point2f(0.180888, 0.214174), Point2f(0.898579, 0.503897)};
+                SampledSpectrum albedo = bsdf.rho(w.wo, ucRho, uRho);
+
                 Point3f p(w.pi);
                 float *row = nrcInputs + size_t(w.pixelIndex) * kNRCInputDims;
+                // dims 0-2: position, normalized to [-1,1] via scene bounds
                 row[0] = 2.f * ((p.x - nrcSceneBounds.pMin.x) / (nrcSceneBounds.pMax.x - nrcSceneBounds.pMin.x)) - 1.f;
                 row[1] = 2.f * ((p.y - nrcSceneBounds.pMin.y) / (nrcSceneBounds.pMax.y - nrcSceneBounds.pMin.y)) - 1.f;
                 row[2] = 2.f * ((p.z - nrcSceneBounds.pMin.z) / (nrcSceneBounds.pMax.z - nrcSceneBounds.pMin.z)) - 1.f;
+                // dims 3-5: outgoing direction (unit vector, components in [-1,1])
                 row[3] = float(w.wo.x);
                 row[4] = float(w.wo.y);
                 row[5] = float(w.wo.z);
+                // dims 6-8: shading normal
+                row[6] = float(ns.x);
+                row[7] = float(ns.y);
+                row[8] = float(ns.z);
+                // dims 9-11: albedo (hemispherical reflectance -> sensor RGB)
+                RGB albedoRGB = film.GetPixelSensor()->ToSensorRGB(albedo, lambda);
+                row[9]  = float(albedoRGB.r);
+                row[10] = float(albedoRGB.g);
+                row[11] = float(albedoRGB.b);
+                // dims 12-14: material type one-hot (diffuse / glossy / specular)
+                // No generic scalar roughness exists on the BSDF interface.
+                BxDFFlags matFlags = bsdf.Flags();
+                row[12] = IsDiffuse(matFlags)  ? 1.f : 0.f;
+                row[13] = IsGlossy(matFlags)   ? 1.f : 0.f;
+                row[14] = IsSpecular(matFlags) ? 1.f : 0.f;
+                // dim 15: reserved (pre-zeroed)
                 nrcValid[w.pixelIndex] = 1;
+
+                // VisibleSurface also needs albedo; populate it here to avoid
+                // a second bsdf.rho() call below.
+                if (initializeVisibleSurface) {
+                    SurfaceInteraction isect;
+                    isect.pi = w.pi;
+                    isect.n = w.n;
+                    isect.shading.n = ns;
+                    isect.uv = w.uv;
+                    isect.wo = w.wo;
+                    isect.time = w.time;
+                    isect.dpdx = dpdx;
+                    isect.dpdy = dpdy;
+                    pixelSampleState.visibleSurface[w.pixelIndex] =
+                        VisibleSurface(isect, albedo, lambda);
+                }
             }
 #endif
 
             // Initialize _VisibleSurface_ at first intersection if necessary
-            if (w.depth == 0 && initializeVisibleSurface) {
+            // (skipped when NRC handled it above, i.e. when nrcInputs != nullptr)
+            if (w.depth == 0 && initializeVisibleSurface
+#ifdef PBRT_BUILD_NRC
+                && nrcInputs == nullptr
+#endif
+            ) {
                 SurfaceInteraction isect;
                 isect.pi = w.pi;
                 isect.n = w.n;
