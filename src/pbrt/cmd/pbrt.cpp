@@ -59,6 +59,7 @@ Rendering options:
   --interactive                 Enable interactive rendering mode.
   --mse-reference-image         Filename for reference image to use for MSE computation.
   --mse-reference-out           File to write MSE error vs spp results.
+  --nrc-train-steps <n>         NRC gradient steps per scanline pass. (Default: 2)
   --nthreads <num>              Use specified number of threads for rendering.
   --outfile <filename>          Write the final image to the given filename.
   --pixel <x,y>                 Render just the specified pixel.
@@ -187,6 +188,7 @@ int main(int argc, char *argv[]) {
                      onError) ||
             ParseArg(&iter, args.end(), "mse-reference-out", &options.mseReferenceOutput,
                      onError) ||
+            ParseArg(&iter, args.end(), "nrc-train-steps", &options.nrcTrainSteps, onError) ||
             ParseArg(&iter, args.end(), "nthreads", &options.nThreads, onError) ||
             ParseArg(&iter, args.end(), "outfile", &options.imageFile, onError) ||
             ParseArg(&iter, args.end(), "pixelstats", &options.recordPixelStatistics,

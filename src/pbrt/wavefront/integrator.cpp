@@ -883,18 +883,19 @@ void WavefrontPathIntegrator::NRCTrainAndInferStep() {
         ++nValid;
     }
 
-    for (int step = 0; step < 2; ++step) {
-        if (nValid > 0) {
-            uint32_t trainBatch = nrc::NeuralRadianceCache::RoundUpBatch(nValid);
-            // Zero-pad the rounded tail so tcnn sees clean zeros, not stale data.
-            if (trainBatch > nValid) {
-                std::memset(nrcCompactInputs + nValid * kNRCInputDims, 0,
-                            (trainBatch - nValid) * kNRCInputDims * sizeof(float));
-                std::memset(nrcCompactTargets + nValid * kNRCOutputDims, 0,
-                            (trainBatch - nValid) * kNRCOutputDims * sizeof(float));
-            }
-            nrcLastLoss =
-                nrcCache->TrainN(nrcCompactInputs, nrcCompactTargets, trainBatch);
+    const int kNRCTrainSteps = Options->nrcTrainSteps;
+    if (nValid > 0) {
+        uint32_t trainBatch = nrc::NeuralRadianceCache::RoundUpBatch(nValid);
+        if (trainBatch > nValid) {
+            std::memset(nrcCompactInputs + nValid * kNRCInputDims, 0,
+                        (trainBatch - nValid) * kNRCInputDims * sizeof(float));
+            std::memset(nrcCompactTargets + nValid * kNRCOutputDims, 0,
+                        (trainBatch - nValid) * kNRCOutputDims * sizeof(float));
+        }
+        for (int step = 0; step < kNRCTrainSteps; ++step) {
+            nrcLastLoss = nrcCache->TrainN(nrcCompactInputs, nrcCompactTargets, trainBatch);
+            fprintf(stderr, "NRC train step %d/%d  nValid=%u  loss=%.6f\n",
+                    step + 1, kNRCTrainSteps, nValid, nrcLastLoss);
         }
     }
 

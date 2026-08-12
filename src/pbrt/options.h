@@ -54,6 +54,7 @@ struct PBRTOptions : BasicPBRTOptions {
     pstd::optional<Bounds2i> pixelBounds;
     pstd::optional<Point2i> pixelMaterial;
     Float displacementEdgeScale = 1;
+    int nrcTrainSteps = 2;     // --nrc-train-steps: gradient steps per scanline pass
 
     std::string ToString() const;
 };
