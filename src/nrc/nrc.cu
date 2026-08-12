@@ -13,6 +13,7 @@
 #include <cuda_runtime.h>
 
 #include <memory>
+#include <fstream>
 #include <stdexcept>
 #include <string>
 
@@ -24,29 +25,41 @@ struct NeuralRadianceCache::Impl {
     cudaStream_t stream = nullptr;
     float lastLoss = 0.f;
 
-    Impl(uint32_t nIn, uint32_t nOut)
-        : model(tcnn::create_from_config(
-              nIn, nOut,
-              {{"loss", {{"otype", "L2"}}},
-               {"optimizer", {{"otype", "Adam"}, {"learning_rate", 1e-3}}},
-               {"encoding", {{"otype", "Identity"}}},
-               {"network",
-                {{"otype", "FullyFusedMLP"},
-                 {"activation", "ReLU"},
-                 {"output_activation", "None"},
-                 {"n_neurons", 64},
-                 {"n_hidden_layers", 3}}}})) {}
+    static tcnn::json buildConfig(const std::string &configFile) {
+        if (!configFile.empty()) {
+            std::ifstream f(configFile);
+            if (!f.is_open())
+                throw std::runtime_error("NRC: cannot open config file: " + configFile);
+            return tcnn::json::parse(f);
+        }
+        return {
+            {"loss",      {{"otype", "L2"}}},
+            {"optimizer", {{"otype", "Adam"}, {"learning_rate", 1e-3}}},
+            {"encoding",  {{"otype", "Identity"}}},
+            {"network",   {
+                {"otype",             "FullyFusedMLP"},
+                {"activation",        "ReLU"},
+                {"output_activation", "None"},
+                {"n_neurons",         64},
+                {"n_hidden_layers",   3}
+            }}
+        };
+    }
+
+    Impl(uint32_t nIn, uint32_t nOut, const std::string &configFile)
+        : model(tcnn::create_from_config(nIn, nOut, buildConfig(configFile))) {}
 };
 
 NeuralRadianceCache::NeuralRadianceCache(uint32_t batchSize_, uint32_t nIn,
-                                         uint32_t nOut)
+                                         uint32_t nOut,
+                                         const std::string &configFile)
     : batchSize(batchSize_), nInputDims(nIn), nOutputDims(nOut) {
     if (batchSize % tcnn::batch_size_granularity != 0) {
         throw std::runtime_error(
             "NeuralRadianceCache: batchSize must be a multiple of " +
             std::to_string(tcnn::batch_size_granularity));
     }
-    impl = new Impl(nIn, nOut);
+    impl = new Impl(nIn, nOut, configFile);
 }
 
 NeuralRadianceCache::~NeuralRadianceCache() {

@@ -10,6 +10,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
 
 namespace pbrt {
 namespace nrc {
@@ -32,7 +33,8 @@ namespace nrc {
 class NeuralRadianceCache {
   public:
     NeuralRadianceCache(uint32_t batchSize, uint32_t nInputDims,
-                        uint32_t nOutputDims);
+                        uint32_t nOutputDims,
+                        const std::string &configFile = "");
     ~NeuralRadianceCache();
 
     NeuralRadianceCache(const NeuralRadianceCache &) = delete;

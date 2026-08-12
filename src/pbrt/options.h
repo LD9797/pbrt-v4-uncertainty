@@ -55,6 +55,7 @@ struct PBRTOptions : BasicPBRTOptions {
     pstd::optional<Point2i> pixelMaterial;
     Float displacementEdgeScale = 1;
     int nrcTrainSteps = 2;     // --nrc-train-steps: gradient steps per scanline pass
+    std::string nrcConfigFile; // --nrc-config: path to tcnn JSON config (empty = built-in default)
 
     std::string ToString() const;
 };

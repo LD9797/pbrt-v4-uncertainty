@@ -60,6 +60,8 @@ Rendering options:
   --mse-reference-image         Filename for reference image to use for MSE computation.
   --mse-reference-out           File to write MSE error vs spp results.
   --nrc-train-steps <n>         NRC gradient steps per scanline pass. (Default: 2)
+  --nrc-config <path>           Path to tcnn JSON config file for the NRC network.
+                                (Default: built-in 64-wide 3-layer MLP)
   --nthreads <num>              Use specified number of threads for rendering.
   --outfile <filename>          Write the final image to the given filename.
   --pixel <x,y>                 Render just the specified pixel.
@@ -189,6 +191,7 @@ int main(int argc, char *argv[]) {
             ParseArg(&iter, args.end(), "mse-reference-out", &options.mseReferenceOutput,
                      onError) ||
             ParseArg(&iter, args.end(), "nrc-train-steps", &options.nrcTrainSteps, onError) ||
+            ParseArg(&iter, args.end(), "nrc-config", &options.nrcConfigFile, onError) ||
             ParseArg(&iter, args.end(), "nthreads", &options.nThreads, onError) ||
             ParseArg(&iter, args.end(), "outfile", &options.imageFile, onError) ||
             ParseArg(&iter, args.end(), "pixelstats", &options.recordPixelStatistics,

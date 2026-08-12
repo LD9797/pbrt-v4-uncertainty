@@ -316,7 +316,8 @@ WavefrontPathIntegrator::WavefrontPathIntegrator(
         cudaMemset(nrcInferenceOutputs, 0,
                    sizeof(float) * kNRCOutputDims * nrcBatchSize);
         nrcCache = new nrc::NeuralRadianceCache(nrcBatchSize, kNRCInputDims,
-                                                kNRCOutputDims);
+                                                kNRCOutputDims,
+                                                Options->nrcConfigFile);
         LOG_VERBOSE("NRC: created cache batchSize=%d nParams=%zu", nrcBatchSize,
                     nrcCache->NumParams());
     }
