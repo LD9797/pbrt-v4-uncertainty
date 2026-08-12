@@ -879,7 +879,7 @@ void WavefrontPathIntegrator::NRCTrainAndInferStep() {
         float *dst = nrcCompactTargets + nValid * kNRCOutputDims;
         const float *src = nrcTargets   + i      * kNRCOutputDims;
         for (uint32_t c = 0; c < kNRCOutputDims; ++c)
-            dst[c] = std::log1p(src[c]);
+            dst[c] = std::log1p(std::max(0.f, src[c]));  // clamp: ToOutputRGB can return negative for out-of-gamut spectra
         ++nValid;
     }
 
@@ -894,8 +894,8 @@ void WavefrontPathIntegrator::NRCTrainAndInferStep() {
         }
         for (int step = 0; step < kNRCTrainSteps; ++step) {
             nrcLastLoss = nrcCache->TrainN(nrcCompactInputs, nrcCompactTargets, trainBatch);
-            fprintf(stderr, "NRC train step %d/%d  nValid=%u  loss=%.6f\n",
-                    step + 1, kNRCTrainSteps, nValid, nrcLastLoss);
+           // fprintf(stderr, "NRC train step %d/%d  nValid=%u  loss=%.6f\n",
+            //        step + 1, kNRCTrainSteps, nValid, nrcLastLoss);
         }
     }
 
@@ -925,9 +925,9 @@ void WavefrontPathIntegrator::NRCTrainAndInferStep() {
             if (x < 0 || y < 0 || x >= res.x || y >= res.y)
                 return;
             int pix = y * res.x + x;
-            predImg[pix * 3 + 0] = std::expm1(outputs[i * (int)kNRCOutputDims + 0]);
-            predImg[pix * 3 + 1] = std::expm1(outputs[i * (int)kNRCOutputDims + 1]);
-            predImg[pix * 3 + 2] = std::expm1(outputs[i * (int)kNRCOutputDims + 2]);
+            predImg[pix * 3 + 0] = std::max(0.f, std::expm1(outputs[i * (int)kNRCOutputDims + 0]));
+            predImg[pix * 3 + 1] = std::max(0.f, std::expm1(outputs[i * (int)kNRCOutputDims + 1]));
+            predImg[pix * 3 + 2] = std::max(0.f, std::expm1(outputs[i * (int)kNRCOutputDims + 2]));
         });
 
     ++nrcSampleCounter;

@@ -33,7 +33,7 @@ void WavefrontPathIntegrator::UpdateFilm() {
             // earlier in EvaluateMaterialAndBSDF for this pixelIndex.
             if (nrcTargets != nullptr && nrcValid != nullptr &&
                 nrcValid[pixelIndex]) {
-                RGB rgb = film.GetPixelSensor()->ToSensorRGB(Lw, lambda);
+                RGB rgb = film.ToOutputRGB(Lw, lambda);
                 float *t = nrcTargets +
                            size_t(pixelIndex) * kNRCOutputDims;
                 t[0] = float(rgb.r);

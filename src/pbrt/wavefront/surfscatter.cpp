@@ -181,7 +181,7 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                 row[7] = float(ns.y);
                 row[8] = float(ns.z);
                 // dims 9-11: albedo (hemispherical reflectance -> sensor RGB)
-                RGB albedoRGB = film.GetPixelSensor()->ToSensorRGB(albedo, lambda);
+                RGB albedoRGB = film.ToOutputRGB(albedo, lambda);
                 row[9]  = float(albedoRGB.r);
                 row[10] = float(albedoRGB.g);
                 row[11] = float(albedoRGB.b);

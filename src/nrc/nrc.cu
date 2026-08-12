@@ -35,7 +35,7 @@ struct NeuralRadianceCache::Impl {
                  {"activation", "ReLU"},
                  {"output_activation", "None"},
                  {"n_neurons", 64},
-                 {"n_hidden_layers", 2}}}})) {}
+                 {"n_hidden_layers", 3}}}})) {}
 };
 
 NeuralRadianceCache::NeuralRadianceCache(uint32_t batchSize_, uint32_t nIn,
