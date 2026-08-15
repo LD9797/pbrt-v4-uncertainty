@@ -541,6 +541,57 @@ Float WavefrontPathIntegrator::Render() {
 #ifdef PBRT_BUILD_NRC
     if (Options->useGPU && nrcCache && nrcPredictedRGB) {
         cudaDeviceSynchronize();
+        // Final coherent inference sweep: re-capture depth-0 surface features
+        // for every scanline band using the fully-trained network so that
+        // nrc_predicted.exr reflects one consistent network state instead of
+        // the band-by-band drift that happens during training.
+        for (int y0 = pixelBounds.pMin.y; y0 < pixelBounds.pMax.y;
+             y0 += scanlinesPerPass) {
+            NRCResetSampleBuffers();
+            RayQueue *cameraRayQueue = CurrentRayQueue(0);
+            RayQueue *nextQueue     = NextRayQueue(0);
+            Do("NRC final: reset queues", PBRT_CPU_GPU_LAMBDA() {
+                cameraRayQueue->Reset();
+                nextQueue->Reset();
+                if (escapedRayQueue)     escapedRayQueue->Reset();
+                hitAreaLightQueue->Reset();
+                basicEvalMaterialQueue->Reset();
+                universalEvalMaterialQueue->Reset();
+                shadowRayQueue->Reset();
+                if (mediumSampleQueue)   mediumSampleQueue->Reset();
+                if (mediumScatterQueue)  mediumScatterQueue->Reset();
+                if (bssrdfEvalQueue)     bssrdfEvalQueue->Reset();
+                if (subsurfaceScatterQueue) subsurfaceScatterQueue->Reset();
+            });
+            GenerateCameraRays(y0, Transform{}, lastSampleIndex - 1);
+            aggregate->IntersectClosest(maxQueueSize, cameraRayQueue,
+                escapedRayQueue, hitAreaLightQueue,
+                basicEvalMaterialQueue, universalEvalMaterialQueue,
+                mediumSampleQueue, nextQueue);
+            EvaluateMaterialsAndBSDFs(0, Transform{});
+            cudaDeviceSynchronize();
+            nrcCache->Inference(nrcInputs, nrcInferenceOutputs);
+            cudaDeviceSynchronize();
+
+            const uint8_t *valid   = nrcValid;
+            float         *predImg = nrcPredictedRGB;
+            const Point2i  res     = nrcResolution;
+            const uint32_t batch   = nrcBatchSize;
+            auto          *psState = &pixelSampleState;
+            const Point2i  pMin    = pixelBounds.pMin;
+            const float   *outputs = nrcInferenceOutputs;
+            ParallelFor("NRC final scatter", batch, PBRT_CPU_GPU_LAMBDA(int i) {
+                if (!valid[i]) return;
+                Point2i p = psState->pPixel[i];
+                int x = p.x - pMin.x, y = p.y - pMin.y;
+                if (x < 0 || y < 0 || x >= res.x || y >= res.y) return;
+                int pix = y * res.x + x;
+                predImg[pix * 3 + 0] = std::max(0.f, std::expm1(outputs[i * (int)kNRCOutputDims + 0]));
+                predImg[pix * 3 + 1] = std::max(0.f, std::expm1(outputs[i * (int)kNRCOutputDims + 1]));
+                predImg[pix * 3 + 2] = std::max(0.f, std::expm1(outputs[i * (int)kNRCOutputDims + 2]));
+            });
+            cudaDeviceSynchronize();
+        }
         NRCDumpPredictedImage("nrc_predicted.exr");
         LOG_VERBOSE("NRC: final loss %f", nrcLastLoss);
     }
@@ -899,37 +950,6 @@ void WavefrontPathIntegrator::NRCTrainAndInferStep() {
             //        step + 1, kNRCTrainSteps, nValid, nrcLastLoss);
         }
     }
-
-    // Inference pass over the same inputs, writing predicted RGB back into
-    // the persistent per-pixel framebuffer for whichever pixels were touched
-    // by this scanline pass.
-    float *outputs = nrcInferenceOutputs;
-    nrcCache->Inference(nrcInputs, outputs);
-    cudaDeviceSynchronize();
-
-    // Scatter predictions into the persistent image, indexed by pPixel of
-    // each pixel sample state slot.
-    const uint8_t *valid = nrcValid;
-    float *predImg = nrcPredictedRGB;
-    const Point2i res = nrcResolution;
-    const uint32_t batch = nrcBatchSize;
-    auto *psState = &pixelSampleState;
-    Bounds2i pixelBounds = film.PixelBounds();
-    Point2i pMin = pixelBounds.pMin;
-    ParallelFor(
-        "NRC scatter predicted RGB", batch, PBRT_CPU_GPU_LAMBDA(int i) {
-            if (!valid[i])
-                return;
-            Point2i pPixel = psState->pPixel[i];
-            int x = pPixel.x - pMin.x;
-            int y = pPixel.y - pMin.y;
-            if (x < 0 || y < 0 || x >= res.x || y >= res.y)
-                return;
-            int pix = y * res.x + x;
-            predImg[pix * 3 + 0] = std::max(0.f, std::expm1(outputs[i * (int)kNRCOutputDims + 0]));
-            predImg[pix * 3 + 1] = std::max(0.f, std::expm1(outputs[i * (int)kNRCOutputDims + 1]));
-            predImg[pix * 3 + 2] = std::max(0.f, std::expm1(outputs[i * (int)kNRCOutputDims + 2]));
-        });
 
     ++nrcSampleCounter;
     if ((nrcSampleCounter & 31) == 0)
