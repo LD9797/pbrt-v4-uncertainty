@@ -586,10 +586,10 @@ Float WavefrontPathIntegrator::Render() {
                 int x = p.x - pMin.x, y = p.y - pMin.y;
                 if (x < 0 || y < 0 || x >= res.x || y >= res.y) return;
                 int pix = y * res.x + x;
-                predImg[pix * 3 + 0] = std::max(0.f, std::expm1(outputs[i * (int)kNRCOutputDims + 0]));
-                predImg[pix * 3 + 1] = std::max(0.f, std::expm1(outputs[i * (int)kNRCOutputDims + 1]));
-                predImg[pix * 3 + 2] = std::max(0.f, std::expm1(outputs[i * (int)kNRCOutputDims + 2]));
-            });
+                predImg[pix * 3 + 0] = std::copysign(std::expm1(std::fabs(outputs[i * (int)kNRCOutputDims + 0])), outputs[i * (int)kNRCOutputDims + 0]);
+                predImg[pix * 3 + 1] = std::copysign(std::expm1(std::fabs(outputs[i * (int)kNRCOutputDims + 1])), outputs[i * (int)kNRCOutputDims + 1]);
+                predImg[pix * 3 + 2] = std::copysign(std::expm1(std::fabs(outputs[i * (int)kNRCOutputDims + 2])), outputs[i * (int)kNRCOutputDims + 2]);
+                });
             cudaDeviceSynchronize();
         }
         NRCDumpPredictedImage("nrc_predicted.exr");

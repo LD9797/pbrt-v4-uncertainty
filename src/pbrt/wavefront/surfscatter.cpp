@@ -15,6 +15,7 @@
 #include <pbrt/util/containers.h>
 #include <pbrt/util/spectrum.h>
 #include <pbrt/util/vecmath.h>
+#include <pbrt/media.h>
 #include <pbrt/wavefront/integrator.h>
 
 #include <type_traits>
@@ -148,7 +149,7 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
             // NRC milestone 2: capture first-hit feature vector (all 15 used dims).
             // Inputs are stored column-major: kNRCInputDims floats per slot,
             // pixelIndex==slot. Dim 15 is pre-zeroed in NRCResetSampleBuffers.
-            if (w.depth == 0 && nrcInputs != nullptr) {
+            if (nrcInputs != nullptr && !nrcValid[w.pixelIndex] && (IsDiffuse || IsGlossy)) {
                 // Albedo: hemispherical-directional reflectance (shared with VisibleSurface below).
                 constexpr int nRhoSamples = 16;
                 const Float ucRho[nRhoSamples] = {
@@ -191,7 +192,19 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                 row[12] = IsDiffuse(matFlags)  ? 1.f : 0.f;
                 row[13] = IsGlossy(matFlags)   ? 1.f : 0.f;
                 row[14] = IsSpecular(matFlags) ? 1.f : 0.f;
-                // dim 15: reserved (pre-zeroed)
+                // dim 15: ray depth
+                row[15] = float(w.depth);
+                // dims 16-19: inside-medium sigma_a (gem absorption color)
+                if (w.mediumInterface.inside) {
+                    MediumProperties mp =
+                        w.mediumInterface.inside.SamplePoint(Point3f(w.pi), lambda);
+                    RGB sigmaRGB = film.ToOutputRGB(mp.sigma_a, lambda);
+                    row[16] = float(sigmaRGB.r);
+                    row[17] = float(sigmaRGB.g);
+                    row[18] = float(sigmaRGB.b);
+                    row[19] = 1.f;
+                }
+                // dims 20-31: reserved (pre-zeroed)
                 nrcValid[w.pixelIndex] = 1;
 
                 // VisibleSurface also needs albedo; populate it here to avoid

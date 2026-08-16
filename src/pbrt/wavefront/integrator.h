@@ -201,10 +201,19 @@ class WavefrontPathIntegrator {
     // ---------------- Neural Radiance Cache (milestone 2) ----------------
     // Buffers are CUDA-managed and indexed by pixelIndex in [0, maxQueueSize).
     // Layouts are column-major to match tcnn::GPUMatrix:
-    //   nrcInputs:  16 floats per slot (pos.xyz, dir.xyz, then zero-padded)
-    //   nrcTargets: 3 floats per slot (RGB radiance)
+    //   nrcInputs:  32 floats per slot
+    //     0-2:   position (normalized to [-1,1] via scene bounds)
+    //     3-5:   outgoing direction (wo.xyz)
+    //     6-8:   shading normal (ns.xyz)
+    //     9-11:  albedo RGB (bsdf.rho via ToOutputRGB)
+    //     12-14: material type one-hot (diffuse / glossy / specular)
+    //     15:    ray depth (float)
+    //     16-18: inside-medium sigma_a RGB (gem color; 0 if no medium)
+    //     19:    has_inside_medium flag (1 if entering a medium)
+    //     20-31: reserved / zero
+    //   nrcTargets: 3 floats per slot (signed-log-encoded RGB radiance)
     //   nrcValid:   1 byte per slot, set at depth==0 first-hit
-    static constexpr uint32_t kNRCInputDims = 16;
+    static constexpr uint32_t kNRCInputDims = 32;
     static constexpr uint32_t kNRCOutputDims = 3;
     uint32_t nrcBatchSize = 0;  // = NeuralRadianceCache::RoundUpBatch(maxQueueSize)
     Bounds3f nrcSceneBounds;        // set from aggregate->Bounds() at init; used to normalize pos to [-1,1]
