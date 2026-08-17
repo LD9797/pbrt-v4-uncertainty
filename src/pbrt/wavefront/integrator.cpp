@@ -592,7 +592,7 @@ Float WavefrontPathIntegrator::Render() {
                 });
             cudaDeviceSynchronize();
         }
-        NRCDumpPredictedImage("nrc_predicted.exr");
+        NRCDumpPredictedImage(Options->nrcOutputFile);
         LOG_VERBOSE("NRC: final loss %f", nrcLastLoss);
     }
 #endif
