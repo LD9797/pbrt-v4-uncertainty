@@ -149,7 +149,10 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
             // NRC milestone 2: capture first-hit feature vector (all 15 used dims).
             // Inputs are stored column-major: kNRCInputDims floats per slot,
             // pixelIndex==slot. Dim 15 is pre-zeroed in NRCResetSampleBuffers.
-            if (nrcInputs != nullptr && !nrcValid[w.pixelIndex] && (IsDiffuse || IsGlossy)) {
+            // Captures on the FIRST hit of any type (including specular), since
+            // specular dielectric shells (gems) carry meaningful sigma_a features
+            // that we don't want to skip past.
+            if (nrcInputs != nullptr && !nrcValid[w.pixelIndex]) {
                 // Albedo: hemispherical-directional reflectance (shared with VisibleSurface below).
                 constexpr int nRhoSamples = 16;
                 const Float ucRho[nRhoSamples] = {
@@ -169,10 +172,10 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
 
                 Point3f p(w.pi);
                 float *row = nrcInputs + size_t(w.pixelIndex) * kNRCInputDims;
-                // dims 0-2: position, normalized to [-1,1] via scene bounds
-                row[0] = 2.f * ((p.x - nrcSceneBounds.pMin.x) / (nrcSceneBounds.pMax.x - nrcSceneBounds.pMin.x)) - 1.f;
-                row[1] = 2.f * ((p.y - nrcSceneBounds.pMin.y) / (nrcSceneBounds.pMax.y - nrcSceneBounds.pMin.y)) - 1.f;
-                row[2] = 2.f * ((p.z - nrcSceneBounds.pMin.z) / (nrcSceneBounds.pMax.z - nrcSceneBounds.pMin.z)) - 1.f;
+                // dims 0-2: position, normalized to [0,1] via scene bounds (required by HashGrid)
+                row[0] = (p.x - nrcSceneBounds.pMin.x) / (nrcSceneBounds.pMax.x - nrcSceneBounds.pMin.x);
+                row[1] = (p.y - nrcSceneBounds.pMin.y) / (nrcSceneBounds.pMax.y - nrcSceneBounds.pMin.y);
+                row[2] = (p.z - nrcSceneBounds.pMin.z) / (nrcSceneBounds.pMax.z - nrcSceneBounds.pMin.z);
                 // dims 3-5: outgoing direction (unit vector, components in [-1,1])
                 row[3] = float(w.wo.x);
                 row[4] = float(w.wo.y);
@@ -194,14 +197,15 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                 row[14] = IsSpecular(matFlags) ? 1.f : 0.f;
                 // dim 15: ray depth
                 row[15] = float(w.depth);
-                // dims 16-19: inside-medium sigma_a (gem absorption color)
+                // dims 16-19: inside-medium sigma_a (gem absorption color), log-compressed
+                // to keep magnitude comparable to the other ~O(1) input features.
                 if (w.mediumInterface.inside) {
                     MediumProperties mp =
                         w.mediumInterface.inside.SamplePoint(Point3f(w.pi), lambda);
                     RGB sigmaRGB = film.ToOutputRGB(mp.sigma_a, lambda);
-                    row[16] = float(sigmaRGB.r);
-                    row[17] = float(sigmaRGB.g);
-                    row[18] = float(sigmaRGB.b);
+                    row[16] = std::log1p(std::max(0.f, float(sigmaRGB.r)));
+                    row[17] = std::log1p(std::max(0.f, float(sigmaRGB.g)));
+                    row[18] = std::log1p(std::max(0.f, float(sigmaRGB.b)));
                     row[19] = 1.f;
                 }
                 // dims 20-31: reserved (pre-zeroed)

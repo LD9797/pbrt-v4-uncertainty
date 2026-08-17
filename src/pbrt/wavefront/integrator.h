@@ -202,7 +202,7 @@ class WavefrontPathIntegrator {
     // Buffers are CUDA-managed and indexed by pixelIndex in [0, maxQueueSize).
     // Layouts are column-major to match tcnn::GPUMatrix:
     //   nrcInputs:  32 floats per slot
-    //     0-2:   position (normalized to [-1,1] via scene bounds)
+    //     0-2:   position (normalized to [0,1] via scene bounds, for HashGrid)
     //     3-5:   outgoing direction (wo.xyz)
     //     6-8:   shading normal (ns.xyz)
     //     9-11:  albedo RGB (bsdf.rho via ToOutputRGB)
