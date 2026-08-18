@@ -210,7 +210,16 @@ class WavefrontPathIntegrator {
     //     15:    ray depth (float)
     //     16-18: inside-medium sigma_a RGB (gem color; 0 if no medium)
     //     19:    has_inside_medium flag (1 if entering a medium)
-    //     20-31: reserved / zero
+    //     20:    roughness X (mfDistrib.AlphaX() for Dielectric/Conductor; bsdf.Roughness() fallback)
+    //     21:    roughness Y (mfDistrib.AlphaY() for Dielectric/Conductor; bsdf.Roughness() fallback)
+    //     22:    eta / IOR (Dielectric/ThinDielectric/Conductor; 1.0 fallback)
+    //     23:    reflective flag (IsReflective(matFlags))
+    //     24:    transmissive flag (IsTransmissive(matFlags))
+    //     25:    dielectric one-hot (compile-time ConcreteBxDF type check)
+    //     26:    conductor one-hot (compile-time ConcreteBxDF type check)
+    //     27-29: reserved / zero (Fresnel F0 RGB; needs conductor k accessor, not added yet)
+    //     30:    has_roughness flag (bsdf.Roughness() > 0)
+    //     31:    reserved / zero
     //   nrcTargets: 3 floats per slot (signed-log-encoded RGB radiance)
     //   nrcValid:   1 byte per slot, set at depth==0 first-hit
     static constexpr uint32_t kNRCInputDims = 32;

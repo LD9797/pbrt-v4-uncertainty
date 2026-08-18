@@ -20,3 +20,4 @@ rtc
 /*.jpg
 
 experiments
+.venv

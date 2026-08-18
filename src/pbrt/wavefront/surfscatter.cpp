@@ -190,7 +190,6 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                 row[10] = float(albedoRGB.g);
                 row[11] = float(albedoRGB.b);
                 // dims 12-14: material type one-hot (diffuse / glossy / specular)
-                // No generic scalar roughness exists on the BSDF interface.
                 BxDFFlags matFlags = bsdf.Flags();
                 row[12] = IsDiffuse(matFlags)  ? 1.f : 0.f;
                 row[13] = IsGlossy(matFlags)   ? 1.f : 0.f;
@@ -208,7 +207,39 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                     row[18] = std::log1p(std::max(0.f, float(sigmaRGB.b)));
                     row[19] = 1.f;
                 }
-                // dims 20-31: reserved (pre-zeroed)
+                // dims 20-21: roughness X/Y. Only Dielectric/Conductor expose a real
+                // microfacet distribution; other types fall back to the isotropic
+                // bsdf.Roughness() average (same value in both channels).
+                if constexpr (std::is_same_v<ConcreteBxDF, DielectricBxDF> ||
+                              std::is_same_v<ConcreteBxDF, ConductorBxDF>) {
+                    TrowbridgeReitzDistribution mf = bxdf.MFDistrib();
+                    row[20] = std::min(mf.AlphaX(), 1.f);
+                    row[21] = std::min(mf.AlphaY(), 1.f);
+                } else {
+                    row[20] = row[21] = bsdf.Roughness();
+                }
+                // dim 22: eta/IOR. 1.0 (no refraction) fallback for types with no
+                // eta concept (diffuse, hair, measured, layered coatings, etc.).
+                if constexpr (std::is_same_v<ConcreteBxDF, DielectricBxDF> ||
+                              std::is_same_v<ConcreteBxDF, ThinDielectricBxDF> ||
+                              std::is_same_v<ConcreteBxDF, ConductorBxDF>)
+                    row[22] = bxdf.Eta();
+                else
+                    row[22] = 1.f;
+                // dims 23-24: reflective / transmissive flags
+                row[23] = IsReflective(matFlags) ? 1.f : 0.f;
+                row[24] = IsTransmissive(matFlags) ? 1.f : 0.f;
+                // dims 25-26: dielectric / conductor one-hot (compile-time type check;
+                // coated variants count toward the type of their base layer)
+                row[25] = (std::is_same_v<ConcreteBxDF, DielectricBxDF> ||
+                          std::is_same_v<ConcreteBxDF, ThinDielectricBxDF> ||
+                          std::is_same_v<ConcreteBxDF, CoatedDiffuseBxDF>) ? 1.f : 0.f;
+                row[26] = (std::is_same_v<ConcreteBxDF, ConductorBxDF> ||
+                          std::is_same_v<ConcreteBxDF, CoatedConductorBxDF>) ? 1.f : 0.f;
+                // dims 27-29: reserved (Fresnel F0 RGB; needs a conductor k accessor, skipped for now)
+                // dim 30: has_roughness flag
+                row[30] = bsdf.Roughness() > 0.f ? 1.f : 0.f;
+                // dim 31: reserved
                 nrcValid[w.pixelIndex] = 1;
 
                 // VisibleSurface also needs albedo; populate it here to avoid

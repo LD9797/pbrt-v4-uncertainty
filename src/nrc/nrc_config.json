@@ -38,6 +38,15 @@
                 "n_bins": 4
             },
             {
+                "n_dims_to_encode": 8,
+                "otype": "Identity"
+            },
+            {
+                "n_dims_to_encode": 3,
+                "otype": "OneBlob",
+                "n_bins": 4
+            },
+            {
                 "otype": "Identity"
             }
         ]
