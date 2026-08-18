@@ -294,7 +294,7 @@ WavefrontPathIntegrator::WavefrontPathIntegrator(
     // both the (GPU) kernels and the (host-side) tcnn callbacks can read/write
     // them without explicit transfers. Sized to a tcnn-compatible padding of
     // the per-pass pixel batch.
-    if (Options->useGPU) {
+    if (Options->useGPU && Options->enableNRC) {
         nrcBatchSize = nrc::NeuralRadianceCache::RoundUpBatch(maxQueueSize);
         nrcSceneBounds = aggregate->Bounds();
         cudaMallocManaged(&nrcInputs,
