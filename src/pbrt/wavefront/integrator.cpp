@@ -586,10 +586,10 @@ Float WavefrontPathIntegrator::Render() {
                 int x = p.x - pMin.x, y = p.y - pMin.y;
                 if (x < 0 || y < 0 || x >= res.x || y >= res.y) return;
                 int pix = y * res.x + x;
-                predImg[pix * 3 + 0] = std::copysign(std::expm1(std::fabs(outputs[i * (int)kNRCOutputDims + 0])), outputs[i * (int)kNRCOutputDims + 0]);
-                predImg[pix * 3 + 1] = std::copysign(std::expm1(std::fabs(outputs[i * (int)kNRCOutputDims + 1])), outputs[i * (int)kNRCOutputDims + 1]);
-                predImg[pix * 3 + 2] = std::copysign(std::expm1(std::fabs(outputs[i * (int)kNRCOutputDims + 2])), outputs[i * (int)kNRCOutputDims + 2]);
-                });
+                predImg[pix * 3 + 0] = std::max(0.f, outputs[i * (int)kNRCOutputDims + 0]);
+                predImg[pix * 3 + 1] = std::max(0.f, outputs[i * (int)kNRCOutputDims + 1]);
+                predImg[pix * 3 + 2] = std::max(0.f, outputs[i * (int)kNRCOutputDims + 2]);
+            });
             cudaDeviceSynchronize();
         }
         NRCDumpPredictedImage(Options->nrcOutputFile);
@@ -931,7 +931,7 @@ void WavefrontPathIntegrator::NRCTrainAndInferStep() {
         float *dst = nrcCompactTargets + nValid * kNRCOutputDims;
         const float *src = nrcTargets   + i      * kNRCOutputDims;
         for (uint32_t c = 0; c < kNRCOutputDims; ++c)
-            dst[c] = std::log1p(std::max(0.f, src[c]));  // clamp: ToOutputRGB can return negative for out-of-gamut spectra
+            dst[c] = std::max(0.f, src[c]); //dst[c] = std::log1p(std::max(0.f, src[c]));  // clamp: ToOutputRGB can return negative for out-of-gamut spectra
         ++nValid;
     }
 
