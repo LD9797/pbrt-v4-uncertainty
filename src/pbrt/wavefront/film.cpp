@@ -27,6 +27,20 @@ void WavefrontPathIntegrator::UpdateFilm() {
             // Provide sample radiance value to film
             SampledWavelengths lambda = pixelSampleState.lambda[pixelIndex];
             Float filterWeight = pixelSampleState.filterWeight[pixelIndex];
+
+#ifdef PBRT_BUILD_NRC
+            // Pair this sample's final radiance with its captured first-hit input row.
+            if (nrcTargets != nullptr && nrcValid != nullptr &&
+                nrcValid[pixelIndex]) {
+                RGB rgb = film.ToOutputRGB(Lw, lambda);
+                float *t = nrcTargets +
+                           size_t(pixelIndex) * kNRCOutputDims;
+                t[0] = float(rgb.r);
+                t[1] = float(rgb.g);
+                t[2] = float(rgb.b);
+            }
+#endif
+
             if (initializeVisibleSurface) {
                 // Call _Film::AddSample()_ with _VisibleSurface_ for pixel sample
                 VisibleSurface visibleSurface =

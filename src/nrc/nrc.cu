@@ -1,0 +1,96 @@
+#include <nrc/nrc.h>
+
+#include <tiny-cuda-nn/common.h>
+#include <tiny-cuda-nn/config.h>
+#include <tiny-cuda-nn/gpu_matrix.h>
+
+#include <cuda_runtime.h>
+
+#include <memory>
+#include <fstream>
+#include <stdexcept>
+#include <string>
+
+namespace pbrt {
+namespace nrc {
+
+struct NeuralRadianceCache::Impl {
+    tcnn::TrainableModel model;
+    cudaStream_t stream = nullptr;
+    float lastLoss = 0.f;
+
+    static tcnn::json buildConfig(const std::string &configFile) {
+        if (!configFile.empty()) {
+            std::ifstream f(configFile);
+            if (!f.is_open())
+                throw std::runtime_error("NRC: cannot open config file: " + configFile);
+            return tcnn::json::parse(f);
+        }
+        return {
+            {"loss",      {{"otype", "L2"}}},
+            {"optimizer", {{"otype", "Adam"}, {"learning_rate", 1e-3}}},
+            {"encoding",  {{"otype", "Identity"}}},
+            {"network",   {
+                {"otype",             "FullyFusedMLP"},
+                {"activation",        "ReLU"},
+                {"output_activation", "None"},
+                {"n_neurons",         64},
+                {"n_hidden_layers",   3}
+            }}
+        };
+    }
+
+    Impl(uint32_t nIn, uint32_t nOut, const std::string &configFile)
+        : model(tcnn::create_from_config(nIn, nOut, buildConfig(configFile))) {}
+};
+
+NeuralRadianceCache::NeuralRadianceCache(uint32_t batchSize_, uint32_t nIn,
+                                         uint32_t nOut,
+                                         const std::string &configFile)
+    : batchSize(batchSize_), nInputDims(nIn), nOutputDims(nOut) {
+    if (batchSize % tcnn::batch_size_granularity != 0) {
+        throw std::runtime_error(
+            "NeuralRadianceCache: batchSize must be a multiple of " +
+            std::to_string(tcnn::batch_size_granularity));
+    }
+    impl = new Impl(nIn, nOut, configFile);
+}
+
+NeuralRadianceCache::~NeuralRadianceCache() {
+    delete impl;
+}
+
+// Round n up to a valid tcnn batch size (CUDA-friendly granularity).
+uint32_t NeuralRadianceCache::RoundUpBatch(uint32_t n) {
+    const uint32_t g = tcnn::batch_size_granularity;
+    return ((n + g - 1) / g) * g;
+}
+
+size_t NeuralRadianceCache::NumParams() const {
+    return impl->model.trainer->n_params();
+}
+
+float NeuralRadianceCache::Train(const float *dInputs, const float *dTargets) {
+    return TrainN(dInputs, dTargets, batchSize);
+}
+
+// One training step over the full batchSize. Returns the loss.
+float NeuralRadianceCache::TrainN(const float *dInputs, const float *dTargets,
+                                   uint32_t n) {
+    tcnn::GPUMatrix<float> inputs(const_cast<float *>(dInputs), nInputDims, n);
+    tcnn::GPUMatrix<float> targets(const_cast<float *>(dTargets), nOutputDims, n);
+    auto ctx = impl->model.trainer->training_step(inputs, targets);
+    impl->lastLoss = impl->model.trainer->loss(*ctx);
+    return impl->lastLoss;
+}
+
+// Forward pass only. Writes nOutputDims*batchSize floats into dOutputs.
+void NeuralRadianceCache::Inference(const float *dInputs, float *dOutputs) {
+    tcnn::GPUMatrix<float> inputs(const_cast<float *>(dInputs), nInputDims,
+                                  batchSize);
+    tcnn::GPUMatrix<float> outputs(dOutputs, nOutputDims, batchSize);
+    impl->model.network->inference(inputs, outputs);
+}
+
+}  // namespace nrc
+}  // namespace pbrt

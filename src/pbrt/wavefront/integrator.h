@@ -23,7 +23,16 @@
 #include <pbrt/wavefront/workitems.h>
 #include <pbrt/wavefront/workqueue.h>
 
+#include <cstdint>
+#include <string>
+
 namespace pbrt {
+
+#ifdef PBRT_BUILD_NRC
+namespace nrc {
+class NeuralRadianceCache;
+}
+#endif
 
 class BasicScene;
 class GUI;
@@ -187,6 +196,55 @@ class WavefrontPathIntegrator {
     RGB *displayRGB = nullptr, *displayRGBHost = nullptr;
     std::atomic<bool> *exitCopyThread;
     std::thread *copyThread;
+
+#ifdef PBRT_BUILD_NRC
+    // ---------------- Neural Radiance Cache (milestone 2) ----------------
+    // Buffers are CUDA-managed and indexed by pixelIndex in [0, maxQueueSize).
+    // Layouts are column-major to match tcnn::GPUMatrix:
+    //   nrcInputs:  32 floats per slot
+    //     0-2:   position (normalized to [0,1] via scene bounds, for HashGrid)
+    //     3-5:   outgoing direction (wo.xyz)
+    //     6-8:   shading normal (ns.xyz)
+    //     9-11:  albedo RGB (bsdf.rho via ToOutputRGB)
+    //     12-14: material type one-hot (diffuse / glossy / specular)
+    //     15:    ray depth (float)
+    //     16-18: inside-medium sigma_a RGB (gem color; 0 if no medium)
+    //     19:    has_inside_medium flag (1 if entering a medium)
+    //     20:    roughness X (mfDistrib.AlphaX() for Dielectric/Conductor; bsdf.Roughness() fallback)
+    //     21:    roughness Y (mfDistrib.AlphaY() for Dielectric/Conductor; bsdf.Roughness() fallback)
+    //     22:    eta / IOR (Dielectric/ThinDielectric/Conductor; 1.0 fallback)
+    //     23:    reflective flag (IsReflective(matFlags))
+    //     24:    transmissive flag (IsTransmissive(matFlags))
+    //     25:    dielectric one-hot (compile-time ConcreteBxDF type check)
+    //     26:    conductor one-hot (compile-time ConcreteBxDF type check)
+    //     27-29: reserved / zero (Fresnel F0 RGB; needs conductor k accessor, not added yet)
+    //     30:    has_roughness flag (bsdf.Roughness() > 0)
+    //     31:    reserved / zero
+    //   nrcTargets: 3 floats per slot (signed-log-encoded RGB radiance)
+    //   nrcValid:   1 byte per slot, set at depth==0 first-hit
+    static constexpr uint32_t kNRCInputDims = 32;
+    static constexpr uint32_t kNRCOutputDims = 3;
+    uint32_t nrcBatchSize = 0;  // = NeuralRadianceCache::RoundUpBatch(maxQueueSize)
+    Bounds3f nrcSceneBounds;        // set from aggregate->Bounds() at init; used to normalize pos to [-1,1]
+    float *nrcInputs = nullptr;
+    float *nrcTargets = nullptr;
+    uint8_t *nrcValid = nullptr;
+    float *nrcCompactInputs  = nullptr;  // valid-only training inputs, compacted each pass
+    float *nrcCompactTargets = nullptr;  // valid-only training targets, compacted each pass
+    float *nrcInferenceOutputs = nullptr;  // scratch for per-step inference
+    // Persistent per-pixel predicted RGB image (sized to film resolution).
+    // Populated by per-sample inference passes; written to EXR at end of Render().
+    float *nrcPredictedRGB = nullptr;
+    Point2i nrcResolution = {0, 0};
+    nrc::NeuralRadianceCache *nrcCache = nullptr;
+    int nrcSampleCounter = 0;
+    float nrcLastLoss = 0.f;
+
+    void NRCResetSampleBuffers();
+    void NRCCaptureFinalRadiance();
+    void NRCTrainAndInferStep();
+    void NRCDumpPredictedImage(const std::string &filename);
+#endif  // PBRT_BUILD_NRC
 };
 
 }  // namespace pbrt

@@ -54,6 +54,10 @@ struct PBRTOptions : BasicPBRTOptions {
     pstd::optional<Bounds2i> pixelBounds;
     pstd::optional<Point2i> pixelMaterial;
     Float displacementEdgeScale = 1;
+    int nrcTrainSteps = 2;             // --nrc-train-steps: gradient steps per scanline pass
+    std::string nrcConfigFile;         // --nrc-config: path to tcnn JSON config (empty = built-in default)
+    std::string nrcOutputFile = "nrc_predicted.exr"; // --nrc-output: save path for the NRC predicted image
+    bool enableNRC = false;            // --enable-nrc: opt-in to the Neural Radiance Cache side-computation
 
     std::string ToString() const;
 };

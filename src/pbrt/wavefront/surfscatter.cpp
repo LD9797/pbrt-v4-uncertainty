@@ -15,6 +15,7 @@
 #include <pbrt/util/containers.h>
 #include <pbrt/util/spectrum.h>
 #include <pbrt/util/vecmath.h>
+#include <pbrt/media.h>
 #include <pbrt/wavefront/integrator.h>
 
 #include <type_traits>
@@ -144,8 +145,128 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
             if (regularize && w.anyNonSpecularBounces)
                 bsdf.Regularize();
 
+#ifdef PBRT_BUILD_NRC
+            // NRC milestone 2: capture first-hit feature vector (all 15 used dims).
+            // Inputs are stored column-major: kNRCInputDims floats per slot,
+            // pixelIndex==slot. Dim 15 is pre-zeroed in NRCResetSampleBuffers.
+            // Captures on the FIRST hit of any type (including specular), since
+            // specular dielectric shells (gems) carry meaningful sigma_a features
+            // that we don't want to skip past.
+            if (nrcInputs != nullptr && !nrcValid[w.pixelIndex]) {
+                // Albedo: hemispherical-directional reflectance (shared with VisibleSurface below).
+                constexpr int nRhoSamples = 16;
+                const Float ucRho[nRhoSamples] = {
+                    0.75741637, 0.37870818, 0.7083487, 0.18935409, 0.9149363, 0.35417435,
+                    0.5990858,  0.09467703, 0.8578725, 0.45746812, 0.686759,  0.17708716,
+                    0.9674518,  0.2995429,  0.5083201, 0.047338516};
+                const Point2f uRho[nRhoSamples] = {
+                    Point2f(0.855985, 0.570367), Point2f(0.381823, 0.851844),
+                    Point2f(0.285328, 0.764262), Point2f(0.733380, 0.114073),
+                    Point2f(0.542663, 0.344465), Point2f(0.127274, 0.414848),
+                    Point2f(0.964700, 0.947162), Point2f(0.594089, 0.643463),
+                    Point2f(0.095109, 0.170369), Point2f(0.825444, 0.263359),
+                    Point2f(0.429467, 0.454469), Point2f(0.244460, 0.816459),
+                    Point2f(0.756135, 0.731258), Point2f(0.516165, 0.152852),
+                    Point2f(0.180888, 0.214174), Point2f(0.898579, 0.503897)};
+                SampledSpectrum albedo = bsdf.rho(w.wo, ucRho, uRho);
+
+                Point3f p(w.pi);
+                float *row = nrcInputs + size_t(w.pixelIndex) * kNRCInputDims;
+                // dims 0-2: position, normalized to [0,1] via scene bounds (required by HashGrid)
+                row[0] = (p.x - nrcSceneBounds.pMin.x) / (nrcSceneBounds.pMax.x - nrcSceneBounds.pMin.x);
+                row[1] = (p.y - nrcSceneBounds.pMin.y) / (nrcSceneBounds.pMax.y - nrcSceneBounds.pMin.y);
+                row[2] = (p.z - nrcSceneBounds.pMin.z) / (nrcSceneBounds.pMax.z - nrcSceneBounds.pMin.z);
+                // dims 3-5: outgoing direction (unit vector, components in [-1,1])
+                row[3] = float(w.wo.x);
+                row[4] = float(w.wo.y);
+                row[5] = float(w.wo.z);
+                // dims 6-8: shading normal
+                row[6] = float(ns.x);
+                row[7] = float(ns.y);
+                row[8] = float(ns.z);
+                // dims 9-11: albedo (hemispherical reflectance -> sensor RGB)
+                RGB albedoRGB = film.ToOutputRGB(albedo, lambda);
+                row[9]  = float(albedoRGB.r);
+                row[10] = float(albedoRGB.g);
+                row[11] = float(albedoRGB.b);
+                // dims 12-14: material type one-hot (diffuse / glossy / specular)
+                BxDFFlags matFlags = bsdf.Flags();
+                row[12] = IsDiffuse(matFlags)  ? 1.f : 0.f;
+                row[13] = IsGlossy(matFlags)   ? 1.f : 0.f;
+                row[14] = IsSpecular(matFlags) ? 1.f : 0.f;
+                // dim 15: ray depth
+                row[15] = float(w.depth);
+                // dims 16-19: inside-medium sigma_a (gem absorption color), log-compressed
+                // to keep magnitude comparable to the other ~O(1) input features.
+                if (w.mediumInterface.inside) {
+                    MediumProperties mp =
+                        w.mediumInterface.inside.SamplePoint(Point3f(w.pi), lambda);
+                    RGB sigmaRGB = film.ToOutputRGB(mp.sigma_a, lambda);
+                    row[16] = std::log1p(std::max(0.f, float(sigmaRGB.r)));
+                    row[17] = std::log1p(std::max(0.f, float(sigmaRGB.g)));
+                    row[18] = std::log1p(std::max(0.f, float(sigmaRGB.b)));
+                    row[19] = 1.f;
+                }
+                // dims 20-21: roughness X/Y. Only Dielectric/Conductor expose a real
+                // microfacet distribution; other types fall back to the isotropic
+                // bsdf.Roughness() average (same value in both channels).
+                if constexpr (std::is_same_v<ConcreteBxDF, DielectricBxDF> ||
+                              std::is_same_v<ConcreteBxDF, ConductorBxDF>) {
+                    TrowbridgeReitzDistribution mf = bxdf.MFDistrib();
+                    row[20] = std::min(mf.AlphaX(), 1.f);
+                    row[21] = std::min(mf.AlphaY(), 1.f);
+                } else {
+                    row[20] = row[21] = bsdf.Roughness();
+                }
+                // dim 22: eta/IOR. 1.0 (no refraction) fallback for types with no
+                // eta concept (diffuse, hair, measured, layered coatings, etc.).
+                if constexpr (std::is_same_v<ConcreteBxDF, DielectricBxDF> ||
+                              std::is_same_v<ConcreteBxDF, ThinDielectricBxDF> ||
+                              std::is_same_v<ConcreteBxDF, ConductorBxDF>)
+                    row[22] = bxdf.Eta();
+                else
+                    row[22] = 1.f;
+                // dims 23-24: reflective / transmissive flags
+                row[23] = IsReflective(matFlags) ? 1.f : 0.f;
+                row[24] = IsTransmissive(matFlags) ? 1.f : 0.f;
+                // dims 25-26: dielectric / conductor one-hot (compile-time type check;
+                // coated variants count toward the type of their base layer)
+                row[25] = (std::is_same_v<ConcreteBxDF, DielectricBxDF> ||
+                          std::is_same_v<ConcreteBxDF, ThinDielectricBxDF> ||
+                          std::is_same_v<ConcreteBxDF, CoatedDiffuseBxDF>) ? 1.f : 0.f;
+                row[26] = (std::is_same_v<ConcreteBxDF, ConductorBxDF> ||
+                          std::is_same_v<ConcreteBxDF, CoatedConductorBxDF>) ? 1.f : 0.f;
+                // dims 27-29: reserved (Fresnel F0 RGB; needs a conductor k accessor, skipped for now)
+                // dim 30: has_roughness flag
+                row[30] = bsdf.Roughness() > 0.f ? 1.f : 0.f;
+                // dim 31: reserved
+                nrcValid[w.pixelIndex] = 1;
+
+                // VisibleSurface also needs albedo; populate it here to avoid
+                // a second bsdf.rho() call below.
+                if (initializeVisibleSurface) {
+                    SurfaceInteraction isect;
+                    isect.pi = w.pi;
+                    isect.n = w.n;
+                    isect.shading.n = ns;
+                    isect.uv = w.uv;
+                    isect.wo = w.wo;
+                    isect.time = w.time;
+                    isect.dpdx = dpdx;
+                    isect.dpdy = dpdy;
+                    pixelSampleState.visibleSurface[w.pixelIndex] =
+                        VisibleSurface(isect, albedo, lambda);
+                }
+            }
+#endif
+
             // Initialize _VisibleSurface_ at first intersection if necessary
-            if (w.depth == 0 && initializeVisibleSurface) {
+            // (skipped when NRC handled it above, i.e. when nrcInputs != nullptr)
+            if (w.depth == 0 && initializeVisibleSurface
+#ifdef PBRT_BUILD_NRC
+                && nrcInputs == nullptr
+#endif
+            ) {
                 SurfaceInteraction isect;
                 isect.pi = w.pi;
                 isect.n = w.n;
