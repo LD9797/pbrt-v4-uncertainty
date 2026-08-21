@@ -29,8 +29,7 @@ void WavefrontPathIntegrator::UpdateFilm() {
             Float filterWeight = pixelSampleState.filterWeight[pixelIndex];
 
 #ifdef PBRT_BUILD_NRC
-            // NRC milestone 2: record target RGB for the first-hit captured
-            // earlier in EvaluateMaterialAndBSDF for this pixelIndex.
+            // Pair this sample's final radiance with its captured first-hit input row.
             if (nrcTargets != nullptr && nrcValid != nullptr &&
                 nrcValid[pixelIndex]) {
                 RGB rgb = film.ToOutputRGB(Lw, lambda);

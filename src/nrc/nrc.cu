@@ -1,9 +1,3 @@
-// pbrt-v4 NRC milestone 2: tiny-cuda-nn-backed neural radiance cache.
-//
-// Mirrors the config from src/nrc/milestone1.cu (identity encoding,
-// FullyFusedMLP 2x64 ReLU, Adam, L2 loss). The integrator owns one of
-// these and calls Train()/Inference() once per scanline pass.
-
 #include <nrc/nrc.h>
 
 #include <tiny-cuda-nn/common.h>
@@ -66,6 +60,7 @@ NeuralRadianceCache::~NeuralRadianceCache() {
     delete impl;
 }
 
+// Round n up to a valid tcnn batch size (CUDA-friendly granularity).
 uint32_t NeuralRadianceCache::RoundUpBatch(uint32_t n) {
     const uint32_t g = tcnn::batch_size_granularity;
     return ((n + g - 1) / g) * g;
@@ -79,6 +74,7 @@ float NeuralRadianceCache::Train(const float *dInputs, const float *dTargets) {
     return TrainN(dInputs, dTargets, batchSize);
 }
 
+// One training step over the full batchSize. Returns the loss.
 float NeuralRadianceCache::TrainN(const float *dInputs, const float *dTargets,
                                    uint32_t n) {
     tcnn::GPUMatrix<float> inputs(const_cast<float *>(dInputs), nInputDims, n);
@@ -88,6 +84,7 @@ float NeuralRadianceCache::TrainN(const float *dInputs, const float *dTargets,
     return impl->lastLoss;
 }
 
+// Forward pass only. Writes nOutputDims*batchSize floats into dOutputs.
 void NeuralRadianceCache::Inference(const float *dInputs, float *dOutputs) {
     tcnn::GPUMatrix<float> inputs(const_cast<float *>(dInputs), nInputDims,
                                   batchSize);

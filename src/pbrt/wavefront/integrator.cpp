@@ -352,8 +352,7 @@ Float WavefrontPathIntegrator::Render() {
 
 #ifdef PBRT_BUILD_NRC
     // Lazily allocate the per-pixel NRC prediction image now that we know
-    // the film resolution. Initialised to zero so areas the network never
-    // sees first-hit data for remain black.
+    // the film resolution. 
     if (Options->useGPU && nrcCache && nrcPredictedRGB == nullptr) {
         nrcResolution = Point2i(resolution.x, resolution.y);
         size_t nPixels = size_t(nrcResolution.x) * nrcResolution.y;
@@ -412,6 +411,7 @@ Float WavefrontPathIntegrator::Render() {
                    });
 
 #ifdef PBRT_BUILD_NRC
+                // Reset NRC sample buffers for the new scanline range.
                 NRCResetSampleBuffers();
 #endif
 
@@ -488,6 +488,7 @@ Float WavefrontPathIntegrator::Render() {
                 UpdateFilm();
 
 #ifdef PBRT_BUILD_NRC
+                // Current scanline pass has finished gathering valid training samples.
                 NRCTrainAndInferStep();
 #endif
             }
@@ -543,8 +544,7 @@ Float WavefrontPathIntegrator::Render() {
         cudaDeviceSynchronize();
         // Final coherent inference sweep: re-capture depth-0 surface features
         // for every scanline band using the fully-trained network so that
-        // nrc_predicted.exr reflects one consistent network state instead of
-        // the band-by-band drift that happens during training.
+        // nrc_predicted.exr reflects one consistent network state.
         for (int y0 = pixelBounds.pMin.y; y0 < pixelBounds.pMax.y;
              y0 += scanlinesPerPass) {
             NRCResetSampleBuffers();
