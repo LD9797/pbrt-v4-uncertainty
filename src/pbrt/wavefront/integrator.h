@@ -65,7 +65,7 @@ class WavefrontPathIntegrator {
     // WavefrontPathIntegrator Public Methods
 
     #ifdef PBRT_BUILD_NRC
-    static constexpr uint32_t kNRCInputDims = 16;
+    static constexpr uint32_t kNRCInputDims = 64;
     static constexpr uint32_t kNRCOutputDims = 3;
 
     uint32_t nrcBatchSize = 0;
