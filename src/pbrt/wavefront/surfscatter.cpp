@@ -172,24 +172,32 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
 
                 Point3f p(w.pi);
                 float *row = nrcInputs + size_t(w.pixelIndex) * kNRCInputDims;
-                // dims 0-2: position, normalized to [0,1] via scene bounds -> Frequency(6)
-                row[0] = (p.x - nrcSceneBounds.pMin.x) / (nrcSceneBounds.pMax.x - nrcSceneBounds.pMin.x);
-                row[1] = (p.y - nrcSceneBounds.pMin.y) / (nrcSceneBounds.pMax.y - nrcSceneBounds.pMin.y);
-                row[2] = (p.z - nrcSceneBounds.pMin.z) / (nrcSceneBounds.pMax.z - nrcSceneBounds.pMin.z);
-                // dims 3-4: outgoing direction, spherical (theta,phi) mapped to [0,1] -> OneBlob(4)
-                row[3] = std::acos(Clamp(w.wo.z, -1.f, 1.f)) * InvPi;
-                row[4] = (std::atan2(w.wo.y, w.wo.x) + Pi) * Inv2Pi;
-                // dims 5-6: shading normal, spherical (theta,phi) mapped to [0,1] -> OneBlob(4)
-                row[5] = std::acos(Clamp(ns.z, -1.f, 1.f)) * InvPi;
-                row[6] = (std::atan2(ns.y, ns.x) + Pi) * Inv2Pi;
-                // dim 7: roughness, transformed 1-exp(-r) per Muller et al. -> OneBlob(4)
-                row[7] = 1.f - std::exp(-bsdf.Roughness());
-                // dims 8-10: diffuse albedo (hemispherical reflectance -> sensor RGB), raw
+                // dims 0-35: position, normalized to [0,1] via scene bounds, then encoded
+                // with 12 sin-only frequency bands per axis (Muller et al. 2021 explicitly
+                // omit the cosine half used by NeRF-style encodings). Fed to tcnn as raw
+                // Identity dims -- the frequency expansion happens here, not in tcnn.
+                Float pn[3] = {
+                    (p.x - nrcSceneBounds.pMin.x) / (nrcSceneBounds.pMax.x - nrcSceneBounds.pMin.x),
+                    (p.y - nrcSceneBounds.pMin.y) / (nrcSceneBounds.pMax.y - nrcSceneBounds.pMin.y),
+                    (p.z - nrcSceneBounds.pMin.z) / (nrcSceneBounds.pMax.z - nrcSceneBounds.pMin.z)};
+                constexpr int nPosFreqs = 12;
+                for (int axis = 0; axis < 3; ++axis)
+                    for (int d = 0; d < nPosFreqs; ++d)
+                        row[axis * nPosFreqs + d] = std::sin(Float(1 << d) * pn[axis]);
+                // dims 36-37: outgoing direction, spherical (theta,phi) mapped to [0,1] -> OneBlob(4)
+                row[36] = std::acos(Clamp(w.wo.z, -1.f, 1.f)) * InvPi;
+                row[37] = (std::atan2(w.wo.y, w.wo.x) + Pi) * Inv2Pi;
+                // dims 38-39: shading normal, spherical (theta,phi) mapped to [0,1] -> OneBlob(4)
+                row[38] = std::acos(Clamp(ns.z, -1.f, 1.f)) * InvPi;
+                row[39] = (std::atan2(ns.y, ns.x) + Pi) * Inv2Pi;
+                // dim 40: roughness, transformed 1-exp(-r) per Muller et al. -> OneBlob(4)
+                row[40] = 1.f - std::exp(-bsdf.Roughness());
+                // dims 41-43: diffuse albedo (hemispherical reflectance -> sensor RGB), raw
                 RGB albedoRGB = film.ToOutputRGB(albedo, lambda);
-                row[8] = float(albedoRGB.r);
-                row[9] = float(albedoRGB.g);
-                row[10] = float(albedoRGB.b);
-                // dims 11-13: specular reflectance F0 (Fresnel at normal incidence), raw.
+                row[41] = float(albedoRGB.r);
+                row[42] = float(albedoRGB.g);
+                row[43] = float(albedoRGB.b);
+                // dims 44-46: specular reflectance F0 (Fresnel at normal incidence), raw.
                 // 0 for types with no specular-lobe concept (diffuse, hair, measured, etc.).
                 RGB f0RGB(0.f, 0.f, 0.f);
                 if constexpr (std::is_same_v<ConcreteBxDF, DielectricBxDF>) {
@@ -198,12 +206,12 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                 } else if constexpr (std::is_same_v<ConcreteBxDF, ConductorBxDF>) {
                     f0RGB = film.ToOutputRGB(bxdf.F0(), lambda);
                 }
-                row[11] = f0RGB.r;
-                row[12] = f0RGB.g;
-                row[13] = f0RGB.b;
-                // dims 14-15: padding, constant 1 (paper pads to 64 for tile alignment)
-                row[14] = 1.f;
-                row[15] = 1.f;
+                row[44] = f0RGB.r;
+                row[45] = f0RGB.g;
+                row[46] = f0RGB.b;
+                // dims 47-48: padding, constant 1 (paper pads to 64 for tile alignment)
+                row[47] = 1.f;
+                row[48] = 1.f;
                 nrcValid[w.pixelIndex] = 1;
 
                 // VisibleSurface also needs albedo; populate it here to avoid

@@ -14,9 +14,8 @@
         "otype": "Composite",
         "nested": [
             {
-                "n_dims_to_encode": 3,
-                "otype": "Frequency",
-                "n_frequencies": 6
+                "n_dims_to_encode": 36,
+                "otype": "Identity"
             },
             {
                 "n_dims_to_encode": 2,
