@@ -201,28 +201,20 @@ class WavefrontPathIntegrator {
     // ---------------- Neural Radiance Cache (milestone 2) ----------------
     // Buffers are CUDA-managed and indexed by pixelIndex in [0, maxQueueSize).
     // Layouts are column-major to match tcnn::GPUMatrix:
-    //   nrcInputs:  32 floats per slot
-    //     0-2:   position (normalized to [0,1] via scene bounds, for HashGrid)
-    //     3-5:   outgoing direction (wo.xyz)
-    //     6-8:   shading normal (ns.xyz)
-    //     9-11:  albedo RGB (bsdf.rho via ToOutputRGB)
-    //     12-14: material type one-hot (diffuse / glossy / specular)
-    //     15:    ray depth (float)
-    //     16-18: inside-medium sigma_a RGB (gem color; 0 if no medium)
-    //     19:    has_inside_medium flag (1 if entering a medium)
-    //     20:    roughness X (mfDistrib.AlphaX() for Dielectric/Conductor; bsdf.Roughness() fallback)
-    //     21:    roughness Y (mfDistrib.AlphaY() for Dielectric/Conductor; bsdf.Roughness() fallback)
-    //     22:    eta / IOR (Dielectric/ThinDielectric/Conductor; 1.0 fallback)
-    //     23:    reflective flag (IsReflective(matFlags))
-    //     24:    transmissive flag (IsTransmissive(matFlags))
-    //     25:    dielectric one-hot (compile-time ConcreteBxDF type check)
-    //     26:    conductor one-hot (compile-time ConcreteBxDF type check)
-    //     27-29: reserved / zero (Fresnel F0 RGB; needs conductor k accessor, not added yet)
-    //     30:    has_roughness flag (bsdf.Roughness() > 0)
-    //     31:    reserved / zero
+    //   nrcInputs: 16 raw floats per slot, matching Muller et al. 2021's NRC
+    //   input layer 1:1 (encoding happens in nrc_config.json, not here):
+    //     0-2: position (normalized to [0,1] via scene bounds; -> Frequency(6) = 36)
+    //     3-4: outgoing direction, spherical (theta,phi in [0,1]; -> OneBlob(4) = 8)
+    //     5-6: shading normal, spherical (theta,phi in [0,1]; -> OneBlob(4) = 8)
+    //     7:   roughness, transformed 1-exp(-r) (-> OneBlob(4) = 4)
+    //     8-10: diffuse albedo RGB (bsdf.rho via ToOutputRGB; raw, Identity)
+    //     11-13: specular reflectance F0 RGB (Dielectric/Conductor Fresnel at
+    //            normal incidence; 0 for other types; raw, Identity)
+    //     14-15: padding, constant 1 (paper pads to 64 for tcnn tile alignment)
+    //   Total encoded width: 36+8+8+4+3+3+2 = 64
     //   nrcTargets: 3 floats per slot (signed-log-encoded RGB radiance)
     //   nrcValid:   1 byte per slot, set at depth==0 first-hit
-    static constexpr uint32_t kNRCInputDims = 32;
+    static constexpr uint32_t kNRCInputDims = 16;
     static constexpr uint32_t kNRCOutputDims = 3;
     uint32_t nrcBatchSize = 0;  // = NeuralRadianceCache::RoundUpBatch(maxQueueSize)
     Bounds3f nrcSceneBounds;        // set from aggregate->Bounds() at init; used to normalize pos to [-1,1]

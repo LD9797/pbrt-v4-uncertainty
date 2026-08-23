@@ -146,12 +146,12 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                 bsdf.Regularize();
 
 #ifdef PBRT_BUILD_NRC
-            // NRC milestone 2: capture first-hit feature vector (all 15 used dims).
-            // Inputs are stored column-major: kNRCInputDims floats per slot,
-            // pixelIndex==slot. Dim 15 is pre-zeroed in NRCResetSampleBuffers.
+            // NRC milestone 2: capture first-hit feature vector, matching Muller
+            // et al. 2021 (Neural Radiance Caching)'s 64-wide input layer 1:1.
+            // Inputs are stored column-major: kNRCInputDims raw floats per slot
+            // (encoding to the full 64 dims happens in nrc_config.json), pixelIndex==slot.
             // Captures on the FIRST hit of any type (including specular), since
-            // specular dielectric shells (gems) carry meaningful sigma_a features
-            // that we don't want to skip past.
+            // specular dielectric shells (gems) still need a valid input row.
             if (nrcInputs != nullptr && !nrcValid[w.pixelIndex]) {
                 // Albedo: hemispherical-directional reflectance (shared with VisibleSurface below).
                 constexpr int nRhoSamples = 16;
@@ -172,74 +172,38 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
 
                 Point3f p(w.pi);
                 float *row = nrcInputs + size_t(w.pixelIndex) * kNRCInputDims;
-                // dims 0-2: position, normalized to [0,1] via scene bounds (required by HashGrid)
+                // dims 0-2: position, normalized to [0,1] via scene bounds -> Frequency(6)
                 row[0] = (p.x - nrcSceneBounds.pMin.x) / (nrcSceneBounds.pMax.x - nrcSceneBounds.pMin.x);
                 row[1] = (p.y - nrcSceneBounds.pMin.y) / (nrcSceneBounds.pMax.y - nrcSceneBounds.pMin.y);
                 row[2] = (p.z - nrcSceneBounds.pMin.z) / (nrcSceneBounds.pMax.z - nrcSceneBounds.pMin.z);
-                // dims 3-5: outgoing direction (unit vector, components in [-1,1])
-                row[3] = float(w.wo.x);
-                row[4] = float(w.wo.y);
-                row[5] = float(w.wo.z);
-                // dims 6-8: shading normal
-                row[6] = float(ns.x);
-                row[7] = float(ns.y);
-                row[8] = float(ns.z);
-                // dims 9-11: albedo (hemispherical reflectance -> sensor RGB)
+                // dims 3-4: outgoing direction, spherical (theta,phi) mapped to [0,1] -> OneBlob(4)
+                row[3] = std::acos(Clamp(w.wo.z, -1.f, 1.f)) * InvPi;
+                row[4] = (std::atan2(w.wo.y, w.wo.x) + Pi) * Inv2Pi;
+                // dims 5-6: shading normal, spherical (theta,phi) mapped to [0,1] -> OneBlob(4)
+                row[5] = std::acos(Clamp(ns.z, -1.f, 1.f)) * InvPi;
+                row[6] = (std::atan2(ns.y, ns.x) + Pi) * Inv2Pi;
+                // dim 7: roughness, transformed 1-exp(-r) per Muller et al. -> OneBlob(4)
+                row[7] = 1.f - std::exp(-bsdf.Roughness());
+                // dims 8-10: diffuse albedo (hemispherical reflectance -> sensor RGB), raw
                 RGB albedoRGB = film.ToOutputRGB(albedo, lambda);
-                row[9]  = float(albedoRGB.r);
-                row[10] = float(albedoRGB.g);
-                row[11] = float(albedoRGB.b);
-                // dims 12-14: material type one-hot (diffuse / glossy / specular)
-                BxDFFlags matFlags = bsdf.Flags();
-                row[12] = IsDiffuse(matFlags)  ? 1.f : 0.f;
-                row[13] = IsGlossy(matFlags)   ? 1.f : 0.f;
-                row[14] = IsSpecular(matFlags) ? 1.f : 0.f;
-                // dim 15: ray depth
-                row[15] = float(w.depth);
-                // dims 16-19: inside-medium sigma_a (gem absorption color), log-compressed
-                // to keep magnitude comparable to the other ~O(1) input features.
-                if (w.mediumInterface.inside) {
-                    MediumProperties mp =
-                        w.mediumInterface.inside.SamplePoint(Point3f(w.pi), lambda);
-                    RGB sigmaRGB = film.ToOutputRGB(mp.sigma_a, lambda);
-                    row[16] = std::log1p(std::max(0.f, float(sigmaRGB.r)));
-                    row[17] = std::log1p(std::max(0.f, float(sigmaRGB.g)));
-                    row[18] = std::log1p(std::max(0.f, float(sigmaRGB.b)));
-                    row[19] = 1.f;
+                row[8] = float(albedoRGB.r);
+                row[9] = float(albedoRGB.g);
+                row[10] = float(albedoRGB.b);
+                // dims 11-13: specular reflectance F0 (Fresnel at normal incidence), raw.
+                // 0 for types with no specular-lobe concept (diffuse, hair, measured, etc.).
+                RGB f0RGB(0.f, 0.f, 0.f);
+                if constexpr (std::is_same_v<ConcreteBxDF, DielectricBxDF>) {
+                    Float f0 = bxdf.F0();
+                    f0RGB = RGB(f0, f0, f0);
+                } else if constexpr (std::is_same_v<ConcreteBxDF, ConductorBxDF>) {
+                    f0RGB = film.ToOutputRGB(bxdf.F0(), lambda);
                 }
-                // dims 20-21: roughness X/Y. Only Dielectric/Conductor expose a real
-                // microfacet distribution; other types fall back to the isotropic
-                // bsdf.Roughness() average (same value in both channels).
-                if constexpr (std::is_same_v<ConcreteBxDF, DielectricBxDF> ||
-                              std::is_same_v<ConcreteBxDF, ConductorBxDF>) {
-                    TrowbridgeReitzDistribution mf = bxdf.MFDistrib();
-                    row[20] = std::min(mf.AlphaX(), 1.f);
-                    row[21] = std::min(mf.AlphaY(), 1.f);
-                } else {
-                    row[20] = row[21] = bsdf.Roughness();
-                }
-                // dim 22: eta/IOR. 1.0 (no refraction) fallback for types with no
-                // eta concept (diffuse, hair, measured, layered coatings, etc.).
-                if constexpr (std::is_same_v<ConcreteBxDF, DielectricBxDF> ||
-                              std::is_same_v<ConcreteBxDF, ThinDielectricBxDF> ||
-                              std::is_same_v<ConcreteBxDF, ConductorBxDF>)
-                    row[22] = bxdf.Eta();
-                else
-                    row[22] = 1.f;
-                // dims 23-24: reflective / transmissive flags
-                row[23] = IsReflective(matFlags) ? 1.f : 0.f;
-                row[24] = IsTransmissive(matFlags) ? 1.f : 0.f;
-                // dims 25-26: dielectric / conductor one-hot (compile-time type check;
-                // coated variants count toward the type of their base layer)
-                row[25] = (std::is_same_v<ConcreteBxDF, DielectricBxDF> ||
-                          std::is_same_v<ConcreteBxDF, ThinDielectricBxDF> ||
-                          std::is_same_v<ConcreteBxDF, CoatedDiffuseBxDF>) ? 1.f : 0.f;
-                row[26] = (std::is_same_v<ConcreteBxDF, ConductorBxDF> ||
-                          std::is_same_v<ConcreteBxDF, CoatedConductorBxDF>) ? 1.f : 0.f;
-                // dims 27-29: reserved (Fresnel F0 RGB; needs a conductor k accessor, skipped for now)
-                // dim 30: has_roughness flag
-                row[30] = bsdf.Roughness() > 0.f ? 1.f : 0.f;
-                // dim 31: reserved
+                row[11] = f0RGB.r;
+                row[12] = f0RGB.g;
+                row[13] = f0RGB.b;
+                // dims 14-15: padding, constant 1 (paper pads to 64 for tile alignment)
+                row[14] = 1.f;
+                row[15] = 1.f;
                 nrcValid[w.pixelIndex] = 1;
 
                 // VisibleSurface also needs albedo; populate it here to avoid

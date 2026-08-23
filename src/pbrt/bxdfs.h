@@ -214,6 +214,8 @@ class DielectricBxDF {
     Float Eta() const { return eta; }
     PBRT_CPU_GPU
     TrowbridgeReitzDistribution MFDistrib() const { return mfDistrib; }
+    PBRT_CPU_GPU
+    Float F0() const { Float f = (eta - 1) / (eta + 1); return f * f; }
 
   private:
     // DielectricBxDF Private Members
@@ -405,6 +407,8 @@ class ConductorBxDF {
     Float Eta() const { return eta.Average(); }
     PBRT_CPU_GPU
     TrowbridgeReitzDistribution MFDistrib() const { return mfDistrib; }
+    PBRT_CPU_GPU
+    SampledSpectrum F0() const { return FrComplex(1.f, eta, k); }
 
   private:
     // ConductorBxDF Private Members
