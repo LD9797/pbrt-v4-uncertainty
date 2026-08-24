@@ -302,11 +302,13 @@ WavefrontPathIntegrator::WavefrontPathIntegrator(
         cudaMallocManaged(&nrcTargets,
                           sizeof(float) * kNRCOutputDims * nrcBatchSize);
         cudaMallocManaged(&nrcValid, sizeof(uint8_t) * nrcBatchSize);
+        cudaMallocManaged(&nrcTrainingPath, sizeof(uint8_t) * nrcBatchSize);
         cudaMemset(nrcInputs, 0,
                    sizeof(float) * kNRCInputDims * nrcBatchSize);
         cudaMemset(nrcTargets, 0,
                    sizeof(float) * kNRCOutputDims * nrcBatchSize);
         cudaMemset(nrcValid, 0, sizeof(uint8_t) * nrcBatchSize);
+        cudaMemset(nrcTrainingPath, 0, sizeof(uint8_t) * nrcBatchSize);
         cudaMallocManaged(&nrcCompactInputs,
                           sizeof(float) * kNRCInputDims * nrcBatchSize);
         cudaMallocManaged(&nrcCompactTargets,
@@ -542,6 +544,9 @@ Float WavefrontPathIntegrator::Render() {
 #ifdef PBRT_BUILD_NRC
     if (Options->useGPU && nrcCache && nrcPredictedRGB) {
         cudaDeviceSynchronize();
+        // Every path must produce a prediction, so force full capture
+        // (overriding the 1-in-32 training-path selection) for this sweep.
+        nrcCaptureAll = true;
         // Final coherent inference sweep: re-capture depth-0 surface features
         // for every scanline band using the fully-trained network so that
         // nrc_predicted.exr reflects one consistent network state.
@@ -902,10 +907,12 @@ void WavefrontPathIntegrator::NRCResetSampleBuffers() {
     float *inputs = nrcInputs;
     float *targets = nrcTargets;
     uint8_t *valid = nrcValid;
+    uint8_t *trainingPath = nrcTrainingPath;
     const uint32_t batch = nrcBatchSize;
     ParallelFor(
         "NRC reset", batch, PBRT_CPU_GPU_LAMBDA(int i) {
             valid[i] = 0;
+            trainingPath[i] = 0;
             for (int c = 0; c < (int)kNRCInputDims; ++c)
                 inputs[i * (int)kNRCInputDims + c] = 0.f;
             for (int c = 0; c < (int)kNRCOutputDims; ++c)

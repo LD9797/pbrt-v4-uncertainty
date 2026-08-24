@@ -218,6 +218,8 @@ class WavefrontPathIntegrator {
     //   Total encoded width: 36+8+8+4+3+3+2 = 64
     //   nrcTargets: 3 floats per slot (signed-log-encoded RGB radiance)
     //   nrcValid:   1 byte per slot, set at depth==0 first-hit
+    //   nrcTrainingPath: 1 byte per slot, set by GenerateCameraRays before the
+    //     first hit is even traced. 
     static constexpr uint32_t kNRCInputDims = 49;
     static constexpr uint32_t kNRCOutputDims = 3;
     uint32_t nrcBatchSize = 0;  // = NeuralRadianceCache::RoundUpBatch(maxQueueSize)
@@ -225,6 +227,8 @@ class WavefrontPathIntegrator {
     float *nrcInputs = nullptr;
     float *nrcTargets = nullptr;
     uint8_t *nrcValid = nullptr;
+    uint8_t *nrcTrainingPath = nullptr;  // 1 = this path was selected to generate a training record this pass
+    bool nrcCaptureAll = false;  // true during the final inference sweep: capture every path, ignore selection
     float *nrcCompactInputs  = nullptr;  // valid-only training inputs, compacted each pass
     float *nrcCompactTargets = nullptr;  // valid-only training targets, compacted each pass
     float *nrcInferenceOutputs = nullptr;  // scratch for per-step inference

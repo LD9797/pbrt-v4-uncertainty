@@ -8,6 +8,7 @@
 #include <pbrt/options.h>
 #include <pbrt/samplers.h>
 #include <pbrt/util/bluenoise.h>
+#include <pbrt/util/hash.h>
 #include <pbrt/util/spectrum.h>
 #include <pbrt/util/vecmath.h>
 #include <pbrt/wavefront/integrator.h>
@@ -69,6 +70,16 @@ void WavefrontPathIntegrator::GenerateCameraRays(int y0, Transform movingFromCam
             pixelSampleState.filterWeight[pixelIndex] = cameraSample.filterWeight;
             if (initializeVisibleSurface)
                 pixelSampleState.visibleSurface[pixelIndex] = VisibleSurface();
+
+#ifdef PBRT_BUILD_NRC
+            // Select 1 out of every 32 paths to be an NRC training path.
+            if (nrcTrainingPath != nullptr) {
+                bool isTrainingPath =
+                    nrcCaptureAll ||
+                    (Hash(pPixel.x, pPixel.y, sampleIndex) & 31u) == 0u;
+                nrcTrainingPath[pixelIndex] = isTrainingPath ? 1 : 0;
+            }
+#endif
 
             // Enqueue camera ray for intersection tests
             if (cameraRay) {

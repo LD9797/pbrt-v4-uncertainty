@@ -152,7 +152,12 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
             // (encoding to the full 64 dims happens in nrc_config.json), pixelIndex==slot.
             // Captures on the FIRST hit of any type (including specular), since
             // specular dielectric shells (gems) still need a valid input row.
-            if (nrcInputs != nullptr && !nrcValid[w.pixelIndex]) {
+            // Only paths selected as NRC training paths (nrcTrainingPath, set in
+            // GenerateCameraRays -- 1 out of every 32, or all of them during the
+            // final inference sweep) generate a capture; all other paths are
+            // traced normally and never touch the NRC buffers.
+            if (nrcInputs != nullptr && !nrcValid[w.pixelIndex] &&
+                nrcTrainingPath[w.pixelIndex]) {
                 // Albedo: hemispherical-directional reflectance (shared with VisibleSurface below).
                 constexpr int nRhoSamples = 16;
                 const Float ucRho[nRhoSamples] = {
@@ -233,10 +238,12 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
 #endif
 
             // Initialize _VisibleSurface_ at first intersection if necessary
-            // (skipped when NRC handled it above, i.e. when nrcInputs != nullptr)
+            // (skipped when the NRC block above already handled it, i.e. this
+            // was a training/capture path; non-training paths still need it
+            // done here even when NRC is enabled)
             if (w.depth == 0 && initializeVisibleSurface
 #ifdef PBRT_BUILD_NRC
-                && nrcInputs == nullptr
+                && !(nrcInputs != nullptr && nrcValid[w.pixelIndex])
 #endif
             ) {
                 SurfaceInteraction isect;
