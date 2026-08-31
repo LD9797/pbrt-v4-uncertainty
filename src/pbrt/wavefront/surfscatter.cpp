@@ -153,9 +153,14 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
             // formulas. Per Muller et al., "all paths are terminated according
             // to" this heuristic -- it governs every rendering path, not just
             // the sparse subset selected to generate NRC training records.
-            // nrcTrainingPath only gates whether the *query vertex we find*
-            // gets written into nrcInputs/nrcTargets below.
-            bool nrcSpreadActive = nrcInputs != nullptr && !nrcValid[w.pixelIndex];
+            // nrcReachedQueryVertex (distinct from nrcValid, which marks a
+            // written training record) tracks whether THIS path has already
+            // found its query vertex, so spread tracking never re-runs after
+            // that point even for non-training paths. nrcTrainingPath only
+            // gates whether the query vertex we find gets written into
+            // nrcInputs/nrcTargets below.
+            bool nrcSpreadActive =
+                nrcInputs != nullptr && !nrcReachedQueryVertex[w.pixelIndex];
             // Set to true once this vertex is determined to be the query
             // vertex, either because the accumulated spread crossed the
             // threshold or because the path is about to end for some other
@@ -190,6 +195,8 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                 // maxDepth (see Render()) without shading that final hit.
                 if (w.depth == maxDepth - 1)
                     nrcCaptureNow = true;
+                if (nrcCaptureNow)
+                    nrcReachedQueryVertex[w.pixelIndex] = 1;
             }
 #endif
 
@@ -236,8 +243,10 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
 #ifdef PBRT_BUILD_NRC
             // No valid outgoing direction: the path ends at this vertex, so
             // it becomes the query vertex if nothing has captured yet.
-            if (nrcSpreadActive && !bsdfSample)
+            if (nrcSpreadActive && !bsdfSample) {
                 nrcCaptureNow = true;
+                nrcReachedQueryVertex[w.pixelIndex] = 1;
+            }
 #endif
             if (bsdfSample) {
                 // Compute updated path throughput and PDFs and enqueue indirect ray
@@ -280,8 +289,10 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                 // Russian roulette (or f=0/pdf=0 upstream) killed the path:
                 // no further vertex will exist, so this one becomes the query
                 // vertex if nothing has captured yet.
-                if (nrcSpreadActive && !beta)
+                if (nrcSpreadActive && !beta) {
                     nrcCaptureNow = true;
+                    nrcReachedQueryVertex[w.pixelIndex] = 1;
+                }
 #endif
 
                 if (beta) {
@@ -346,7 +357,7 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
             // 32, or all of them during the final inference sweep) actually
             // write a record; other paths still ran the heuristic above (to
             // match Muller et al.'s termination rule) but don't capture.
-            if (nrcSpreadActive && nrcCaptureNow && nrcTrainingPath[w.pixelIndex]) {
+            if (nrcCaptureNow && nrcTrainingPath[w.pixelIndex]) {
                 // Albedo: hemispherical-directional reflectance.
                 constexpr int nRhoSamples = 16;
                 const Float ucRho[nRhoSamples] = {

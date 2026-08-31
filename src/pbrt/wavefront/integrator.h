@@ -217,8 +217,13 @@ class WavefrontPathIntegrator {
     //     47-48: padding, constant 1 (paper pads to 64 for tcnn tile alignment)
     //   Total encoded width: 36+8+8+4+3+3+2 = 64
     //   nrcTargets: 3 floats per slot (signed-log-encoded RGB radiance)
-    //   nrcValid:   1 byte per slot, set at the path's NRC query vertex (see
-    //     nrcPathSpreadAccum below -- NOT always the first hit)
+    //   nrcValid:   1 byte per slot, set only when a training record was
+    //     actually written into nrcInputs/nrcTargets (i.e. this path both
+    //     reached its NRC query vertex AND was selected as a training path)
+    //   nrcReachedQueryVertex: 1 byte per slot, set as soon as ANY path (not
+    //     just training paths) crosses the area-spread threshold below --
+    //     stops that path's spread tracking from running again at later
+    //     vertices, independent of whether a training record gets written
     //   nrcTrainingPath: 1 byte per slot, set by GenerateCameraRays before the
     //     first hit is even traced. 
     static constexpr uint32_t kNRCInputDims = 49;
@@ -243,6 +248,7 @@ class WavefrontPathIntegrator {
     float *nrcInputs = nullptr;
     float *nrcTargets = nullptr;
     uint8_t *nrcValid = nullptr;
+    uint8_t *nrcReachedQueryVertex = nullptr;  // 1 = this path has already found its NRC query vertex
     uint8_t *nrcTrainingPath = nullptr;  // 1 = this path was selected to generate a training record this pass
     bool nrcCaptureAll = false;  // true during the final inference sweep: capture every path, ignore selection
     float *nrcCompactInputs  = nullptr;  // valid-only training inputs, compacted each pass

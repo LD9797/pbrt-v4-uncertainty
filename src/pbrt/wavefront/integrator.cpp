@@ -302,6 +302,7 @@ WavefrontPathIntegrator::WavefrontPathIntegrator(
         cudaMallocManaged(&nrcTargets,
                           sizeof(float) * kNRCOutputDims * nrcBatchSize);
         cudaMallocManaged(&nrcValid, sizeof(uint8_t) * nrcBatchSize);
+        cudaMallocManaged(&nrcReachedQueryVertex, sizeof(uint8_t) * nrcBatchSize);
         cudaMallocManaged(&nrcTrainingPath, sizeof(uint8_t) * nrcBatchSize);
         cudaMallocManaged(&nrcPathSpreadAccum, sizeof(float) * nrcBatchSize);
         cudaMallocManaged(&nrcPathA0, sizeof(float) * nrcBatchSize);
@@ -312,6 +313,7 @@ WavefrontPathIntegrator::WavefrontPathIntegrator(
         cudaMemset(nrcTargets, 0,
                    sizeof(float) * kNRCOutputDims * nrcBatchSize);
         cudaMemset(nrcValid, 0, sizeof(uint8_t) * nrcBatchSize);
+        cudaMemset(nrcReachedQueryVertex, 0, sizeof(uint8_t) * nrcBatchSize);
         cudaMemset(nrcTrainingPath, 0, sizeof(uint8_t) * nrcBatchSize);
         cudaMemset(nrcPathSpreadAccum, 0, sizeof(float) * nrcBatchSize);
         cudaMemset(nrcPathA0, 0, sizeof(float) * nrcBatchSize);
@@ -915,6 +917,7 @@ void WavefrontPathIntegrator::NRCResetSampleBuffers() {
     float *inputs = nrcInputs;
     float *targets = nrcTargets;
     uint8_t *valid = nrcValid;
+    uint8_t *reachedQueryVertex = nrcReachedQueryVertex;
     uint8_t *trainingPath = nrcTrainingPath;
     float *spreadAccum = nrcPathSpreadAccum;
     float *a0 = nrcPathA0;
@@ -922,6 +925,7 @@ void WavefrontPathIntegrator::NRCResetSampleBuffers() {
     ParallelFor(
         "NRC reset", batch, PBRT_CPU_GPU_LAMBDA(int i) {
             valid[i] = 0;
+            reachedQueryVertex[i] = 0;
             trainingPath[i] = 0;
             spreadAccum[i] = 0.f;
             a0[i] = 0.f;
