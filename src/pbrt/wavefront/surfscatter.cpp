@@ -150,17 +150,18 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
             // termination heuristic (Sec. 3.4) to choose the query vertex
             // dynamically per path -- see the long comment on
             // kNRCSpreadC/nrcPathSpreadAccum in integrator.h for the exact
-            // formulas. nrcTrackPath mirrors the old capture gate: only paths
-            // selected as NRC training paths that haven't captured yet
-            // participate.
-            bool nrcTrackPath = nrcInputs != nullptr && !nrcValid[w.pixelIndex] &&
-                                nrcTrainingPath[w.pixelIndex];
+            // formulas. Per Muller et al., "all paths are terminated according
+            // to" this heuristic -- it governs every rendering path, not just
+            // the sparse subset selected to generate NRC training records.
+            // nrcTrainingPath only gates whether the *query vertex we find*
+            // gets written into nrcInputs/nrcTargets below.
+            bool nrcSpreadActive = nrcInputs != nullptr && !nrcValid[w.pixelIndex];
             // Set to true once this vertex is determined to be the query
             // vertex, either because the accumulated spread crossed the
             // threshold or because the path is about to end for some other
             // reason (max depth, Russian roulette, no valid BSDF sample).
             bool nrcCaptureNow = false;
-            if (nrcTrackPath) {
+            if (nrcSpreadActive) {
                 Point3f p(w.pi);
                 Float cosThetaHere = AbsDot(w.wo, ns);
                 if (w.depth == 0) {
@@ -235,7 +236,7 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
 #ifdef PBRT_BUILD_NRC
             // No valid outgoing direction: the path ends at this vertex, so
             // it becomes the query vertex if nothing has captured yet.
-            if (nrcTrackPath && !bsdfSample)
+            if (nrcSpreadActive && !bsdfSample)
                 nrcCaptureNow = true;
 #endif
             if (bsdfSample) {
@@ -279,7 +280,7 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                 // Russian roulette (or f=0/pdf=0 upstream) killed the path:
                 // no further vertex will exist, so this one becomes the query
                 // vertex if nothing has captured yet.
-                if (nrcTrackPath && !beta)
+                if (nrcSpreadActive && !beta)
                     nrcCaptureNow = true;
 #endif
 
@@ -323,7 +324,7 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                     // Path continues past this vertex: remember it as x_{i-1}
                     // and the pdf used to sample wi as p(w_i | x_{i-1}) for
                     // the next vertex's Eq. 3 segment contribution.
-                    if (nrcTrackPath && !nrcCaptureNow) {
+                    if (nrcSpreadActive && !nrcCaptureNow) {
                         nrcPathPrevP[w.pixelIndex] = Point3f(w.pi);
                         nrcPathPrevPdf[w.pixelIndex] =
                             bsdfSample->pdfIsProportional
@@ -340,8 +341,12 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
             // matching Muller et al. 2021's 64-wide input layer 1:1. Inputs
             // are stored column-major: kNRCInputDims raw floats per slot
             // (encoding to the full 64 dims happens in nrc_config.json),
-            // pixelIndex==slot.
-            if (nrcTrackPath && nrcCaptureNow) {
+            // pixelIndex==slot. Only paths selected as NRC training paths
+            // (nrcTrainingPath, set in GenerateCameraRays -- 1 out of every
+            // 32, or all of them during the final inference sweep) actually
+            // write a record; other paths still ran the heuristic above (to
+            // match Muller et al.'s termination rule) but don't capture.
+            if (nrcSpreadActive && nrcCaptureNow && nrcTrainingPath[w.pixelIndex]) {
                 // Albedo: hemispherical-directional reflectance.
                 constexpr int nRhoSamples = 16;
                 const Float ucRho[nRhoSamples] = {
