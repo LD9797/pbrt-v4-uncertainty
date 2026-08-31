@@ -146,106 +146,54 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                 bsdf.Regularize();
 
 #ifdef PBRT_BUILD_NRC
-            // NRC milestone 2: capture first-hit feature vector, matching Muller
-            // et al. 2021 (Neural Radiance Caching)'s 64-wide input layer 1:1.
-            // Inputs are stored column-major: kNRCInputDims raw floats per slot
-            // (encoding to the full 64 dims happens in nrc_config.json), pixelIndex==slot.
-            // Captures on the FIRST hit of any type (including specular), since
-            // specular dielectric shells (gems) still need a valid input row.
-            // Only paths selected as NRC training paths (nrcTrainingPath, set in
-            // GenerateCameraRays -- 1 out of every 32, or all of them during the
-            // final inference sweep) generate a capture; all other paths are
-            // traced normally and never touch the NRC buffers.
-            if (nrcInputs != nullptr && !nrcValid[w.pixelIndex] &&
-                nrcTrainingPath[w.pixelIndex]) {
-                // Albedo: hemispherical-directional reflectance (shared with VisibleSurface below).
-                constexpr int nRhoSamples = 16;
-                const Float ucRho[nRhoSamples] = {
-                    0.75741637, 0.37870818, 0.7083487, 0.18935409, 0.9149363, 0.35417435,
-                    0.5990858,  0.09467703, 0.8578725, 0.45746812, 0.686759,  0.17708716,
-                    0.9674518,  0.2995429,  0.5083201, 0.047338516};
-                const Point2f uRho[nRhoSamples] = {
-                    Point2f(0.855985, 0.570367), Point2f(0.381823, 0.851844),
-                    Point2f(0.285328, 0.764262), Point2f(0.733380, 0.114073),
-                    Point2f(0.542663, 0.344465), Point2f(0.127274, 0.414848),
-                    Point2f(0.964700, 0.947162), Point2f(0.594089, 0.643463),
-                    Point2f(0.095109, 0.170369), Point2f(0.825444, 0.263359),
-                    Point2f(0.429467, 0.454469), Point2f(0.244460, 0.816459),
-                    Point2f(0.756135, 0.731258), Point2f(0.516165, 0.152852),
-                    Point2f(0.180888, 0.214174), Point2f(0.898579, 0.503897)};
-                SampledSpectrum albedo = bsdf.rho(w.wo, ucRho, uRho);
-
+            // NRC milestone 3: track the Muller et al. 2021 area-spread path
+            // termination heuristic (Sec. 3.4) to choose the query vertex
+            // dynamically per path -- see the long comment on
+            // kNRCSpreadC/nrcPathSpreadAccum in integrator.h for the exact
+            // formulas. nrcTrackPath mirrors the old capture gate: only paths
+            // selected as NRC training paths that haven't captured yet
+            // participate.
+            bool nrcTrackPath = nrcInputs != nullptr && !nrcValid[w.pixelIndex] &&
+                                nrcTrainingPath[w.pixelIndex];
+            // Set to true once this vertex is determined to be the query
+            // vertex, either because the accumulated spread crossed the
+            // threshold or because the path is about to end for some other
+            // reason (max depth, Russian roulette, no valid BSDF sample).
+            bool nrcCaptureNow = false;
+            if (nrcTrackPath) {
                 Point3f p(w.pi);
-                float *row = nrcInputs + size_t(w.pixelIndex) * kNRCInputDims;
-                // dims 0-35: position, normalized to [0,1] via scene bounds, then encoded
-                // with 12 sin-only frequency bands per axis (Muller et al. 2021 explicitly
-                // omit the cosine half used by NeRF-style encodings). Fed to tcnn as raw
-                // Identity dims -- the frequency expansion happens here, not in tcnn.
-                Float pn[3] = {
-                    (p.x - nrcSceneBounds.pMin.x) / (nrcSceneBounds.pMax.x - nrcSceneBounds.pMin.x),
-                    (p.y - nrcSceneBounds.pMin.y) / (nrcSceneBounds.pMax.y - nrcSceneBounds.pMin.y),
-                    (p.z - nrcSceneBounds.pMin.z) / (nrcSceneBounds.pMax.z - nrcSceneBounds.pMin.z)};
-                constexpr int nPosFreqs = 12;
-                for (int axis = 0; axis < 3; ++axis)
-                    for (int d = 0; d < nPosFreqs; ++d)
-                        row[axis * nPosFreqs + d] = std::sin(Float(1 << d) * pn[axis]);
-                // dims 36-37: outgoing direction, spherical (theta,phi) mapped to [0,1] -> OneBlob(4)
-                row[36] = std::acos(Clamp(w.wo.z, -1.f, 1.f)) * InvPi;
-                row[37] = (std::atan2(w.wo.y, w.wo.x) + Pi) * Inv2Pi;
-                // dims 38-39: shading normal, spherical (theta,phi) mapped to [0,1] -> OneBlob(4)
-                row[38] = std::acos(Clamp(ns.z, -1.f, 1.f)) * InvPi;
-                row[39] = (std::atan2(ns.y, ns.x) + Pi) * Inv2Pi;
-                // dim 40: roughness, transformed 1-exp(-r) per Muller et al. -> OneBlob(4)
-                row[40] = 1.f - std::exp(-bsdf.Roughness());
-                // dims 41-43: diffuse albedo (hemispherical reflectance -> sensor RGB), raw
-                RGB albedoRGB = film.ToOutputRGB(albedo, lambda);
-                row[41] = float(albedoRGB.r);
-                row[42] = float(albedoRGB.g);
-                row[43] = float(albedoRGB.b);
-                // dims 44-46: specular reflectance F0 (Fresnel at normal incidence), raw.
-                // 0 for types with no specular-lobe concept (diffuse, hair, measured, etc.).
-                RGB f0RGB(0.f, 0.f, 0.f);
-                if constexpr (std::is_same_v<ConcreteBxDF, DielectricBxDF>) {
-                    Float f0 = bxdf.F0();
-                    f0RGB = RGB(f0, f0, f0);
-                } else if constexpr (std::is_same_v<ConcreteBxDF, ConductorBxDF>) {
-                    f0RGB = film.ToOutputRGB(bxdf.F0(), lambda);
+                Float cosThetaHere = AbsDot(w.wo, ns);
+                if (w.depth == 0) {
+                    // Primary vertex x1: establish the Eq. 4 baseline a0 from
+                    // the camera-to-x1 distance, and start the Eq. 3 spread
+                    // sum fresh (it accumulates segments x1-x2, x2-x3, ...).
+                    Float d1Sq = DistanceSquared(nrcPathPrevP[w.pixelIndex], p);
+                    nrcPathA0[w.pixelIndex] =
+                        d1Sq / (4 * Pi * std::max<Float>(cosThetaHere, 1e-6f));
+                    nrcPathSpreadAccum[w.pixelIndex] = 0.f;
+                } else {
+                    // Vertex x_i, i = depth+1 >= 2: accumulate this segment's
+                    // contribution to Eq. 3 and test against c * a0.
+                    Float dSq = DistanceSquared(nrcPathPrevP[w.pixelIndex], p);
+                    Float pdfPrev = std::max<Float>(nrcPathPrevPdf[w.pixelIndex], 1e-6f);
+                    Float term =
+                        std::sqrt(dSq / (pdfPrev * std::max<Float>(cosThetaHere, 1e-6f)));
+                    Float accum = nrcPathSpreadAccum[w.pixelIndex] + term;
+                    nrcPathSpreadAccum[w.pixelIndex] = accum;
+                    if (Sqr(accum) > kNRCSpreadC * nrcPathA0[w.pixelIndex])
+                        nrcCaptureNow = true;
                 }
-                row[44] = f0RGB.r;
-                row[45] = f0RGB.g;
-                row[46] = f0RGB.b;
-                // dims 47-48: padding, constant 1 (paper pads to 64 for tile alignment)
-                row[47] = 1.f;
-                row[48] = 1.f;
-                nrcValid[w.pixelIndex] = 1;
-
-                // VisibleSurface also needs albedo; populate it here to avoid
-                // a second bsdf.rho() call below.
-                if (initializeVisibleSurface) {
-                    SurfaceInteraction isect;
-                    isect.pi = w.pi;
-                    isect.n = w.n;
-                    isect.shading.n = ns;
-                    isect.uv = w.uv;
-                    isect.wo = w.wo;
-                    isect.time = w.time;
-                    isect.dpdx = dpdx;
-                    isect.dpdy = dpdy;
-                    pixelSampleState.visibleSurface[w.pixelIndex] =
-                        VisibleSurface(isect, albedo, lambda);
-                }
+                // Not the only way a path can stop: this is also the last
+                // vertex EvaluateMaterialsAndBSDFs will ever process for this
+                // ray, since the wavefront loop breaks once wavefrontDepth ==
+                // maxDepth (see Render()) without shading that final hit.
+                if (w.depth == maxDepth - 1)
+                    nrcCaptureNow = true;
             }
 #endif
 
             // Initialize _VisibleSurface_ at first intersection if necessary
-            // (skipped when the NRC block above already handled it, i.e. this
-            // was a training/capture path; non-training paths still need it
-            // done here even when NRC is enabled)
-            if (w.depth == 0 && initializeVisibleSurface
-#ifdef PBRT_BUILD_NRC
-                && !(nrcInputs != nullptr && nrcValid[w.pixelIndex])
-#endif
-            ) {
+            if (w.depth == 0 && initializeVisibleSurface) {
                 SurfaceInteraction isect;
                 isect.pi = w.pi;
                 isect.n = w.n;
@@ -284,6 +232,12 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
             RaySamples raySamples = pixelSampleState.samples[w.pixelIndex];
             pstd::optional<BSDFSample> bsdfSample = bsdf.Sample_f<ConcreteBxDF>(
                 wo, raySamples.indirect.uc, raySamples.indirect.u);
+#ifdef PBRT_BUILD_NRC
+            // No valid outgoing direction: the path ends at this vertex, so
+            // it becomes the query vertex if nothing has captured yet.
+            if (nrcTrackPath && !bsdfSample)
+                nrcCaptureNow = true;
+#endif
             if (bsdfSample) {
                 // Compute updated path throughput and PDFs and enqueue indirect ray
                 Vector3f wi = bsdfSample->wi;
@@ -321,6 +275,14 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                         beta /= 1 - q;
                 }
 
+#ifdef PBRT_BUILD_NRC
+                // Russian roulette (or f=0/pdf=0 upstream) killed the path:
+                // no further vertex will exist, so this one becomes the query
+                // vertex if nothing has captured yet.
+                if (nrcTrackPath && !beta)
+                    nrcCaptureNow = true;
+#endif
+
                 if (beta) {
                     // Initialize spawned ray and enqueue for next ray depth
                     if (bsdfSample->IsTransmission() &&
@@ -356,8 +318,93 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                             SafeDiv(beta, r_u)[1], SafeDiv(beta, r_u)[2],
                             SafeDiv(beta, r_u)[3]);
                     }
+
+#ifdef PBRT_BUILD_NRC
+                    // Path continues past this vertex: remember it as x_{i-1}
+                    // and the pdf used to sample wi as p(w_i | x_{i-1}) for
+                    // the next vertex's Eq. 3 segment contribution.
+                    if (nrcTrackPath && !nrcCaptureNow) {
+                        nrcPathPrevP[w.pixelIndex] = Point3f(w.pi);
+                        nrcPathPrevPdf[w.pixelIndex] =
+                            bsdfSample->pdfIsProportional
+                                ? bsdf.PDF<ConcreteBxDF>(wo, bsdfSample->wi)
+                                : bsdfSample->pdf;
+                    }
+#endif
                 }
             }
+
+#ifdef PBRT_BUILD_NRC
+            // This vertex was chosen as the NRC query vertex (see the
+            // area-spread tracking block above): capture its feature vector,
+            // matching Muller et al. 2021's 64-wide input layer 1:1. Inputs
+            // are stored column-major: kNRCInputDims raw floats per slot
+            // (encoding to the full 64 dims happens in nrc_config.json),
+            // pixelIndex==slot.
+            if (nrcTrackPath && nrcCaptureNow) {
+                // Albedo: hemispherical-directional reflectance.
+                constexpr int nRhoSamples = 16;
+                const Float ucRho[nRhoSamples] = {
+                    0.75741637, 0.37870818, 0.7083487, 0.18935409, 0.9149363, 0.35417435,
+                    0.5990858,  0.09467703, 0.8578725, 0.45746812, 0.686759,  0.17708716,
+                    0.9674518,  0.2995429,  0.5083201, 0.047338516};
+                const Point2f uRho[nRhoSamples] = {
+                    Point2f(0.855985, 0.570367), Point2f(0.381823, 0.851844),
+                    Point2f(0.285328, 0.764262), Point2f(0.733380, 0.114073),
+                    Point2f(0.542663, 0.344465), Point2f(0.127274, 0.414848),
+                    Point2f(0.964700, 0.947162), Point2f(0.594089, 0.643463),
+                    Point2f(0.095109, 0.170369), Point2f(0.825444, 0.263359),
+                    Point2f(0.429467, 0.454469), Point2f(0.244460, 0.816459),
+                    Point2f(0.756135, 0.731258), Point2f(0.516165, 0.152852),
+                    Point2f(0.180888, 0.214174), Point2f(0.898579, 0.503897)};
+                SampledSpectrum albedo = bsdf.rho(wo, ucRho, uRho);
+
+                Point3f p(w.pi);
+                float *row = nrcInputs + size_t(w.pixelIndex) * kNRCInputDims;
+                // dims 0-35: position, normalized to [0,1] via scene bounds, then encoded
+                // with 12 sin-only frequency bands per axis (Muller et al. 2021 explicitly
+                // omit the cosine half used by NeRF-style encodings). Fed to tcnn as raw
+                // Identity dims -- the frequency expansion happens here, not in tcnn.
+                Float pn[3] = {
+                    (p.x - nrcSceneBounds.pMin.x) / (nrcSceneBounds.pMax.x - nrcSceneBounds.pMin.x),
+                    (p.y - nrcSceneBounds.pMin.y) / (nrcSceneBounds.pMax.y - nrcSceneBounds.pMin.y),
+                    (p.z - nrcSceneBounds.pMin.z) / (nrcSceneBounds.pMax.z - nrcSceneBounds.pMin.z)};
+                constexpr int nPosFreqs = 12;
+                for (int axis = 0; axis < 3; ++axis)
+                    for (int d = 0; d < nPosFreqs; ++d)
+                        row[axis * nPosFreqs + d] = std::sin(Float(1 << d) * pn[axis]);
+                // dims 36-37: outgoing direction, spherical (theta,phi) mapped to [0,1] -> OneBlob(4)
+                row[36] = std::acos(Clamp(wo.z, -1.f, 1.f)) * InvPi;
+                row[37] = (std::atan2(wo.y, wo.x) + Pi) * Inv2Pi;
+                // dims 38-39: shading normal, spherical (theta,phi) mapped to [0,1] -> OneBlob(4)
+                row[38] = std::acos(Clamp(ns.z, -1.f, 1.f)) * InvPi;
+                row[39] = (std::atan2(ns.y, ns.x) + Pi) * Inv2Pi;
+                // dim 40: roughness, transformed 1-exp(-r) per Muller et al. -> OneBlob(4)
+                row[40] = 1.f - std::exp(-bsdf.Roughness());
+                // dims 41-43: diffuse albedo (hemispherical reflectance -> sensor RGB), raw
+                RGB albedoRGB = film.ToOutputRGB(albedo, lambda);
+                row[41] = float(albedoRGB.r);
+                row[42] = float(albedoRGB.g);
+                row[43] = float(albedoRGB.b);
+                // dims 44-46: specular reflectance F0 (Fresnel at normal incidence), raw.
+                // 0 for types with no specular-lobe concept (diffuse, hair, measured, etc.).
+                RGB f0RGB(0.f, 0.f, 0.f);
+                if constexpr (std::is_same_v<ConcreteBxDF, DielectricBxDF>) {
+                    Float f0 = bxdf.F0();
+                    f0RGB = RGB(f0, f0, f0);
+                } else if constexpr (std::is_same_v<ConcreteBxDF, ConductorBxDF>) {
+                    f0RGB = film.ToOutputRGB(bxdf.F0(), lambda);
+                }
+                row[44] = f0RGB.r;
+                row[45] = f0RGB.g;
+                row[46] = f0RGB.b;
+                // dims 47-48: padding, constant 1 (paper pads to 64 for tile alignment)
+                row[47] = 1.f;
+                row[48] = 1.f;
+                nrcValid[w.pixelIndex] = 1;
+            }
+#endif
+
 
             // Sample light and enqueue shadow ray at intersection point
             BxDFFlags flags = bsdf.Flags();

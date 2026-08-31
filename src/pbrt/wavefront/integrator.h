@@ -217,11 +217,27 @@ class WavefrontPathIntegrator {
     //     47-48: padding, constant 1 (paper pads to 64 for tcnn tile alignment)
     //   Total encoded width: 36+8+8+4+3+3+2 = 64
     //   nrcTargets: 3 floats per slot (signed-log-encoded RGB radiance)
-    //   nrcValid:   1 byte per slot, set at depth==0 first-hit
+    //   nrcValid:   1 byte per slot, set at the path's NRC query vertex (see
+    //     nrcPathSpreadAccum below -- NOT always the first hit)
     //   nrcTrainingPath: 1 byte per slot, set by GenerateCameraRays before the
     //     first hit is even traced. 
     static constexpr uint32_t kNRCInputDims = 49;
     static constexpr uint32_t kNRCOutputDims = 3;
+    // Muller et al. 2021 Sec. 3.4 "Path Termination": all paths are
+    // terminated according to the area-spread heuristic below, which picks
+    // the query vertex dynamically per path (rather than always the first
+    // hit). It is the *primary* rule, but not the only way a path can stop:
+    // if max-depth truncation or Russian roulette ends the path first, the
+    // last vertex actually reached becomes the query vertex by necessity.
+    //   a(x1..xi) = (sum_{k=2}^{i} sqrt(||x_{k-1}-x_k||^2 /
+    //                (p(wk | x_{k-1}) * |cos(theta_k)|)))^2         (Eq. 3)
+    //   a0 = ||x0-x1||^2 / (4*Pi*|cos(theta1)|)                     (Eq. 4)
+    // Terminate (this vertex becomes the query vertex) once a > c * a0.
+    static constexpr float kNRCSpreadC = 0.01f;
+    float *nrcPathSpreadAccum = nullptr;  // running sum of sqrt(...) terms in Eq. 3, reset per camera sample
+    float *nrcPathA0 = nullptr;           // baseline footprint at the primary vertex, Eq. 4
+    Point3f *nrcPathPrevP = nullptr;      // position of the previous path vertex; primed with the camera position
+    float *nrcPathPrevPdf = nullptr;      // solid-angle pdf used to sample the direction that reached the current vertex
     uint32_t nrcBatchSize = 0;  // = NeuralRadianceCache::RoundUpBatch(maxQueueSize)
     Bounds3f nrcSceneBounds;        // set from aggregate->Bounds() at init; used to normalize pos to [-1,1]
     float *nrcInputs = nullptr;

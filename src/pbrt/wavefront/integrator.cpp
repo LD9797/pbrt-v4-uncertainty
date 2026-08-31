@@ -303,12 +303,20 @@ WavefrontPathIntegrator::WavefrontPathIntegrator(
                           sizeof(float) * kNRCOutputDims * nrcBatchSize);
         cudaMallocManaged(&nrcValid, sizeof(uint8_t) * nrcBatchSize);
         cudaMallocManaged(&nrcTrainingPath, sizeof(uint8_t) * nrcBatchSize);
+        cudaMallocManaged(&nrcPathSpreadAccum, sizeof(float) * nrcBatchSize);
+        cudaMallocManaged(&nrcPathA0, sizeof(float) * nrcBatchSize);
+        cudaMallocManaged(&nrcPathPrevP, sizeof(Point3f) * nrcBatchSize);
+        cudaMallocManaged(&nrcPathPrevPdf, sizeof(float) * nrcBatchSize);
         cudaMemset(nrcInputs, 0,
                    sizeof(float) * kNRCInputDims * nrcBatchSize);
         cudaMemset(nrcTargets, 0,
                    sizeof(float) * kNRCOutputDims * nrcBatchSize);
         cudaMemset(nrcValid, 0, sizeof(uint8_t) * nrcBatchSize);
         cudaMemset(nrcTrainingPath, 0, sizeof(uint8_t) * nrcBatchSize);
+        cudaMemset(nrcPathSpreadAccum, 0, sizeof(float) * nrcBatchSize);
+        cudaMemset(nrcPathA0, 0, sizeof(float) * nrcBatchSize);
+        cudaMemset(nrcPathPrevP, 0, sizeof(Point3f) * nrcBatchSize);
+        cudaMemset(nrcPathPrevPdf, 0, sizeof(float) * nrcBatchSize);
         cudaMallocManaged(&nrcCompactInputs,
                           sizeof(float) * kNRCInputDims * nrcBatchSize);
         cudaMallocManaged(&nrcCompactTargets,
@@ -908,11 +916,15 @@ void WavefrontPathIntegrator::NRCResetSampleBuffers() {
     float *targets = nrcTargets;
     uint8_t *valid = nrcValid;
     uint8_t *trainingPath = nrcTrainingPath;
+    float *spreadAccum = nrcPathSpreadAccum;
+    float *a0 = nrcPathA0;
     const uint32_t batch = nrcBatchSize;
     ParallelFor(
         "NRC reset", batch, PBRT_CPU_GPU_LAMBDA(int i) {
             valid[i] = 0;
             trainingPath[i] = 0;
+            spreadAccum[i] = 0.f;
+            a0[i] = 0.f;
             for (int c = 0; c < (int)kNRCInputDims; ++c)
                 inputs[i * (int)kNRCInputDims + c] = 0.f;
             for (int c = 0; c < (int)kNRCOutputDims; ++c)

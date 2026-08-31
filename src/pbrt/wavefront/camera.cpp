@@ -91,6 +91,12 @@ void WavefrontPathIntegrator::GenerateCameraRays(int y0, Transform movingFromCam
                 nrcTrainingPath[pixelIndex] = isTrainingPath ? 1 : 0;
             }
 
+            // Prime the area-spread path-termination tracking (Muller et al.
+            // 2021, Eq. 3-4): x0 is the camera vertex, needed to compute the
+            // Eq. 4 baseline a0 once the primary vertex x1 is hit.
+            if (nrcPathPrevP != nullptr && cameraRay)
+                nrcPathPrevP[pixelIndex] = cameraRay->ray.o;
+
 #endif
 
             // Enqueue camera ray for intersection tests
