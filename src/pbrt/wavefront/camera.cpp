@@ -74,11 +74,23 @@ void WavefrontPathIntegrator::GenerateCameraRays(int y0, Transform movingFromCam
 #ifdef PBRT_BUILD_NRC
             // Select 1 out of every 32 paths to be an NRC training path.
             if (nrcTrainingPath != nullptr) {
-                bool isTrainingPath =
-                    nrcCaptureAll ||
-                    (Hash(pPixel.x, pPixel.y, sampleIndex) & 31u) == 0u;
+                constexpr int tileW = 8;
+                constexpr int tileH = 4;
+
+                Vector2i rel = pPixel - pixelBounds.pMin;
+
+                // One global offset for all tiles in this sample.
+                uint32_t offset = Hash(sampleIndex) % (tileW * tileH);
+
+                int offsetX = int(offset % tileW);
+                int offsetY = int(offset / tileW);
+
+                bool isTrainingPath = nrcCaptureAll || ((rel.x % tileW) == offsetX &&
+                                                        (rel.y % tileH) == offsetY);
+
                 nrcTrainingPath[pixelIndex] = isTrainingPath ? 1 : 0;
             }
+
 #endif
 
             // Enqueue camera ray for intersection tests
