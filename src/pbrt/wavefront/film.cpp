@@ -35,21 +35,21 @@ void WavefrontPathIntegrator::UpdateFilm() {
             // surfscatter.cpp), so pixelSampleState.L now also holds
             // whatever was accumulated after that vertex. Subtract off the
             // nrcSnapshotL taken right before the vertex's own shading to
-            // isolate that continuation, then divide by the throughput that
-            // reached the vertex (nrcSnapshotBeta) so the target is the
-            // vertex's local outgoing radiance, independent of path-specific
-            // throughput -- matching what NRCInferenceForRenderPaths()
-            // substitutes at render time (nrcSnapshotL + nrcSnapshotBeta *
-            // predicted).
+            // isolate that continuation. Deliberately NOT dividing by the
+            // throughput that reached the vertex (nrcSnapshotBeta): that
+            // division blows up whenever betaSnapshot is small, producing
+            // huge targets/predictions and a wildly over-bright image. The
+            // target is therefore the raw (still throughput-weighted)
+            // continuation contribution, matching what
+            // NRCInferenceForRenderPaths() adds directly at render time
+            // (nrcSnapshotL + predicted, no beta multiply).
             if (nrcTargets != nullptr && nrcValid != nullptr &&
                 nrcValid[pixelIndex]) {
                 SampledSpectrum Lraw = pixelSampleState.L[pixelIndex];
-                SampledSpectrum Lsnapshot, betaSnapshot;
-                for (int c = 0; c < NSpectrumSamples; ++c) {
+                SampledSpectrum Lsnapshot;
+                for (int c = 0; c < NSpectrumSamples; ++c)
                     Lsnapshot[c] = nrcSnapshotL[size_t(pixelIndex) * NSpectrumSamples + c];
-                    betaSnapshot[c] = nrcSnapshotBeta[size_t(pixelIndex) * NSpectrumSamples + c];
-                }
-                SampledSpectrum Lo = SafeDiv(Lraw - Lsnapshot, betaSnapshot);
+                SampledSpectrum Lo = Lraw - Lsnapshot;
                 RGB rgb = film.ToOutputRGB(Lo, lambda);
                 float *t = nrcTargets +
                            size_t(pixelIndex) * kNRCOutputDims;

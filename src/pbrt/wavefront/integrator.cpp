@@ -34,6 +34,8 @@
 #include <cstring>
 #include <iostream>
 #include <map>
+#include <algorithm>
+#include <vector>
 
 #ifdef PBRT_BUILD_GPU_RENDERER
 #include <cuda.h>
@@ -955,6 +957,35 @@ void WavefrontPathIntegrator::NRCResetSampleBuffers() {
         });
 }
 
+namespace {
+// Diagnostic: log max/p99/p99.9 of per-sample RGB magnitude (max channel)
+// for a batch of 3-float-per-slot values, restricted to entries where
+// "active" is null or true. Used to check whether the continuation-only,
+// throughput-normalized NRC targets (or its predictions) are blowing up.
+void LogNRCMagnitudeStats(const char *label, const float *base, size_t count,
+                           const uint8_t *active = nullptr) {
+    std::vector<float> mags;
+    mags.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+        if (active && !active[i])
+            continue;
+        const float *rgb = base + i * 3;
+        mags.push_back(std::max({rgb[0], rgb[1], rgb[2]}));
+    }
+    if (mags.empty()) {
+        fprintf(stderr, "NRC %s stats: n=0\n", label);
+        return;
+    }
+    std::sort(mags.begin(), mags.end());
+    size_t n = mags.size();
+    float maxVal = mags.back();
+    float p99 = mags[std::min(n - 1, size_t(0.99 * n))];
+    float p999 = mags[std::min(n - 1, size_t(0.999 * n))];
+    fprintf(stderr, "\nNRC %s stats: n=%zu max=%.3f p99=%.3f p99.9=%.3f\n", label, n,
+            maxVal, p99, p999);
+}
+}  // namespace
+
 void WavefrontPathIntegrator::NRCTrainAndInferStep() {
     if (!nrcCache)
         return;
@@ -995,8 +1026,11 @@ void WavefrontPathIntegrator::NRCTrainAndInferStep() {
 
     ++nrcSampleCounter;
     nrcWarmedUp = nrcSampleCounter >= Options->nrcWarmupSamples;
-    if ((nrcSampleCounter & 31) == 0)
+    if ((nrcSampleCounter & 31) == 0) {
         LOG_VERBOSE("NRC: step %d loss %f", nrcSampleCounter, nrcLastLoss);
+        if (nValid > 0)
+            LogNRCMagnitudeStats("target", nrcCompactTargets, nValid);
+    }
 }
 
 void WavefrontPathIntegrator::NRCInferenceForRenderPaths() {
@@ -1014,7 +1048,6 @@ void WavefrontPathIntegrator::NRCInferenceForRenderPaths() {
 
     const uint8_t *renderQuery = nrcRenderQuery;
     const float *outputs = nrcInferenceOutputs;
-    const float *snapshotBeta = nrcSnapshotBeta;
     auto *psState = &pixelSampleState;
     const uint32_t batch = nrcBatchSize;
     const RGBColorSpace *colorSpace = RGBColorSpace::sRGB;
@@ -1026,16 +1059,18 @@ void WavefrontPathIntegrator::NRCInferenceForRenderPaths() {
                     std::max(0.f, outputs[i * (int)kNRCOutputDims + 1]),
                     std::max(0.f, outputs[i * (int)kNRCOutputDims + 2]));
             SampledWavelengths lambda = psState->lambda[i];
+            // Predicted radiance is already the raw (throughput-weighted)
+            // continuation contribution -- see the target comment in
+            // film.cpp -- so it's added directly, with no beta multiply.
             SampledSpectrum predicted = RGBUnboundedSpectrum(*colorSpace, rgb).Sample(lambda);
 
-            SampledSpectrum beta;
-            for (int c = 0; c < NSpectrumSamples; ++c)
-                beta[c] = snapshotBeta[i * NSpectrumSamples + c];
-
             SampledSpectrum Lprev = psState->L[i];
-            psState->L[i] = Lprev + beta * predicted;
+            psState->L[i] = Lprev + predicted;
         });
     cudaDeviceSynchronize();
+
+    if (nrcWarmedUp && (nrcSampleCounter & 31) == 0)
+        LogNRCMagnitudeStats("prediction", nrcInferenceOutputs, nrcBatchSize, nrcRenderQuery);
 }
 
 void WavefrontPathIntegrator::NRCDumpPredictedImage(const std::string &filename) {

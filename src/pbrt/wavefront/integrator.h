@@ -241,13 +241,17 @@ class WavefrontPathIntegrator {
     //     the four ways above), regardless of training/render status.
     //     nrcSnapshotBeta is the path throughput arriving at that vertex
     //     (before any of its own scattering); nrcSnapshotL is pixelSampleState
-    //     .L just before that vertex's own NEE runs. UpdateFilm() uses both to
-    //     turn the full-path Lw into a continuation-only, throughput-
-    //     normalized training target: (Lw - nrcSnapshotL) / nrcSnapshotBeta,
-    //     matching what NRCInferenceForRenderPaths() substitutes at render
-    //     time (nrcSnapshotL + nrcSnapshotBeta * predicted).
+    //     .L just before that vertex's own NEE runs. UpdateFilm() uses
+    //     nrcSnapshotL to turn the full-path Lw into a continuation-only
+    //     training target: Lw - nrcSnapshotL, matching what
+    //     NRCInferenceForRenderPaths() adds directly at render time
+    //     (nrcSnapshotL + predicted). nrcSnapshotBeta is captured but
+    //     deliberately NOT divided into the target -- doing so blows up
+    //     whenever the throughput is small, producing huge targets and an
+    //     over-bright image.
     static constexpr uint32_t kNRCInputDims = 49;
     static constexpr uint32_t kNRCOutputDims = 3;
+
     // Muller et al. 2021 Sec. 3.4 "Path Termination": all paths are
     // terminated according to the area-spread heuristic below, which picks
     // the query vertex dynamically per path (rather than always the first
