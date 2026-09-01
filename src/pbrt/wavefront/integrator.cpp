@@ -327,6 +327,16 @@ WavefrontPathIntegrator::WavefrontPathIntegrator(
                           sizeof(float) * kNRCOutputDims * nrcBatchSize);
         cudaMemset(nrcInferenceOutputs, 0,
                    sizeof(float) * kNRCOutputDims * nrcBatchSize);
+        cudaMallocManaged(&nrcRenderQuery, sizeof(uint8_t) * nrcBatchSize);
+        cudaMallocManaged(&nrcSnapshotBeta,
+                          sizeof(float) * NSpectrumSamples * nrcBatchSize);
+        cudaMallocManaged(&nrcSnapshotL,
+                          sizeof(float) * NSpectrumSamples * nrcBatchSize);
+        cudaMemset(nrcRenderQuery, 0, sizeof(uint8_t) * nrcBatchSize);
+        cudaMemset(nrcSnapshotBeta, 0,
+                   sizeof(float) * NSpectrumSamples * nrcBatchSize);
+        cudaMemset(nrcSnapshotL, 0,
+                   sizeof(float) * NSpectrumSamples * nrcBatchSize);
         nrcCache = new nrc::NeuralRadianceCache(nrcBatchSize, kNRCInputDims,
                                                 kNRCOutputDims,
                                                 Options->nrcConfigFile);
@@ -496,6 +506,13 @@ Float WavefrontPathIntegrator::Render() {
 
                     SampleSubsurface(wavefrontDepth);
                 }
+
+#ifdef PBRT_BUILD_NRC
+                // Non-training paths that terminated at their query vertex
+                // this pass get the cache's prediction substituted into L
+                // before the film ever sees it.
+                NRCInferenceForRenderPaths();
+#endif
 
                 UpdateFilm();
 
@@ -919,6 +936,7 @@ void WavefrontPathIntegrator::NRCResetSampleBuffers() {
     uint8_t *valid = nrcValid;
     uint8_t *reachedQueryVertex = nrcReachedQueryVertex;
     uint8_t *trainingPath = nrcTrainingPath;
+    uint8_t *renderQuery = nrcRenderQuery;
     float *spreadAccum = nrcPathSpreadAccum;
     float *a0 = nrcPathA0;
     const uint32_t batch = nrcBatchSize;
@@ -927,6 +945,7 @@ void WavefrontPathIntegrator::NRCResetSampleBuffers() {
             valid[i] = 0;
             reachedQueryVertex[i] = 0;
             trainingPath[i] = 0;
+            renderQuery[i] = 0;
             spreadAccum[i] = 0.f;
             a0[i] = 0.f;
             for (int c = 0; c < (int)kNRCInputDims; ++c)
@@ -975,8 +994,48 @@ void WavefrontPathIntegrator::NRCTrainAndInferStep() {
     }
 
     ++nrcSampleCounter;
+    nrcWarmedUp = nrcSampleCounter >= Options->nrcWarmupSamples;
     if ((nrcSampleCounter & 31) == 0)
         LOG_VERBOSE("NRC: step %d loss %f", nrcSampleCounter, nrcLastLoss);
+}
+
+void WavefrontPathIntegrator::NRCInferenceForRenderPaths() {
+    if (!nrcCache)
+        return;
+    // Ensure surfscatter.cpp's feature-row and snapshot writes for this pass
+    // are visible before tcnn reads nrcInputs.
+    cudaDeviceSynchronize();
+
+    // Inference runs over the whole (uncompacted) batch, same as the final
+    // debug sweep: harmless for slots that aren't a render query this pass,
+    // since those are filtered out below via nrcRenderQuery.
+    nrcCache->Inference(nrcInputs, nrcInferenceOutputs);
+    cudaDeviceSynchronize();
+
+    const uint8_t *renderQuery = nrcRenderQuery;
+    const float *outputs = nrcInferenceOutputs;
+    const float *snapshotBeta = nrcSnapshotBeta;
+    auto *psState = &pixelSampleState;
+    const uint32_t batch = nrcBatchSize;
+    const RGBColorSpace *colorSpace = RGBColorSpace::sRGB;
+    ParallelFor(
+        "NRC render substitution", batch, PBRT_CPU_GPU_LAMBDA(int i) {
+            if (!renderQuery[i])
+                return;
+            RGB rgb(std::max(0.f, outputs[i * (int)kNRCOutputDims + 0]),
+                    std::max(0.f, outputs[i * (int)kNRCOutputDims + 1]),
+                    std::max(0.f, outputs[i * (int)kNRCOutputDims + 2]));
+            SampledWavelengths lambda = psState->lambda[i];
+            SampledSpectrum predicted = RGBUnboundedSpectrum(*colorSpace, rgb).Sample(lambda);
+
+            SampledSpectrum beta;
+            for (int c = 0; c < NSpectrumSamples; ++c)
+                beta[c] = snapshotBeta[i * NSpectrumSamples + c];
+
+            SampledSpectrum Lprev = psState->L[i];
+            psState->L[i] = Lprev + beta * predicted;
+        });
+    cudaDeviceSynchronize();
 }
 
 void WavefrontPathIntegrator::NRCDumpPredictedImage(const std::string &filename) {

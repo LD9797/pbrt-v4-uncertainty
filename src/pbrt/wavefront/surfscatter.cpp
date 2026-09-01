@@ -145,6 +145,12 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
             if (regularize && w.anyNonSpecularBounces)
                 bsdf.Regularize();
 
+            // Set below (NRC builds only) when this vertex terminates a
+            // non-training path via the cache instead of a real continuation
+            // ray; declared unconditionally so the BSDF-sampling/NEE code
+            // further down can guard on it without more #ifdefs.
+            bool nrcTerminateAndSubstitute = false;
+
 #ifdef PBRT_BUILD_NRC
             // NRC milestone 3: track the Muller et al. 2021 area-spread path
             // termination heuristic (Sec. 3.4) to choose the query vertex
@@ -198,6 +204,34 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                 if (nrcCaptureNow)
                     nrcReachedQueryVertex[w.pixelIndex] = 1;
             }
+            // nrcTerminateAndSubstitute: true only for a *non-training* path
+            // whose query vertex was just chosen by the area-spread
+            // heuristic or max-depth truncation above -- the two cases where
+            // the path would otherwise keep bouncing at real expense. (Russian
+            // roulette and an invalid BSDF sample, checked further below, are
+            // natural dead ends with no continuation left to approximate, so
+            // they never set this flag.) Such paths skip their own NEE and
+            // indirect bounce below; NRCInferenceForRenderPaths() queries the
+            // cache for all of them after this scanline pass's depth loop and
+            // substitutes beta * predicted radiance for the skipped work.
+            // Gated on nrcWarmedUp so substitution never engages until the
+            // cache has actually trained on nrcWarmupSamples passes worth of
+            // data -- otherwise an untrained network's predictions would get
+            // permanently baked into the progressively-accumulated film.
+            nrcTerminateAndSubstitute =
+                nrcWarmedUp && nrcCaptureNow && !nrcTrainingPath[w.pixelIndex];
+            if (nrcCaptureNow) {
+                // Snapshot the instant the query vertex is found (whichever
+                // of the four ways) so film.cpp can turn the eventual
+                // full-path Lw into a continuation-only, throughput-
+                // normalized training target, and so the render substitution
+                // above can add exactly that continuation back in.
+                for (int c = 0; c < NSpectrumSamples; ++c)
+                    nrcSnapshotBeta[w.pixelIndex * NSpectrumSamples + c] = w.beta[c];
+                SampledSpectrum nrcLSoFar = pixelSampleState.L[w.pixelIndex];
+                for (int c = 0; c < NSpectrumSamples; ++c)
+                    nrcSnapshotL[w.pixelIndex * NSpectrumSamples + c] = nrcLSoFar[c];
+            }
 #endif
 
             // Initialize _VisibleSurface_ at first intersection if necessary
@@ -238,6 +272,7 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
             // Sample BSDF and enqueue indirect ray at intersection point
             Vector3f wo = w.wo;
             RaySamples raySamples = pixelSampleState.samples[w.pixelIndex];
+            if (!nrcTerminateAndSubstitute) {
             pstd::optional<BSDFSample> bsdfSample = bsdf.Sample_f<ConcreteBxDF>(
                 wo, raySamples.indirect.uc, raySamples.indirect.u);
 #ifdef PBRT_BUILD_NRC
@@ -246,6 +281,11 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
             if (nrcSpreadActive && !bsdfSample) {
                 nrcCaptureNow = true;
                 nrcReachedQueryVertex[w.pixelIndex] = 1;
+                for (int c = 0; c < NSpectrumSamples; ++c)
+                    nrcSnapshotBeta[w.pixelIndex * NSpectrumSamples + c] = w.beta[c];
+                SampledSpectrum nrcLSoFar = pixelSampleState.L[w.pixelIndex];
+                for (int c = 0; c < NSpectrumSamples; ++c)
+                    nrcSnapshotL[w.pixelIndex * NSpectrumSamples + c] = nrcLSoFar[c];
             }
 #endif
             if (bsdfSample) {
@@ -292,6 +332,11 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                 if (nrcSpreadActive && !beta) {
                     nrcCaptureNow = true;
                     nrcReachedQueryVertex[w.pixelIndex] = 1;
+                    for (int c = 0; c < NSpectrumSamples; ++c)
+                        nrcSnapshotBeta[w.pixelIndex * NSpectrumSamples + c] = w.beta[c];
+                    SampledSpectrum nrcLSoFar = pixelSampleState.L[w.pixelIndex];
+                    for (int c = 0; c < NSpectrumSamples; ++c)
+                        nrcSnapshotL[w.pixelIndex * NSpectrumSamples + c] = nrcLSoFar[c];
                 }
 #endif
 
@@ -345,6 +390,7 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
 #endif
                 }
             }
+            }  // !nrcTerminateAndSubstitute
 
 #ifdef PBRT_BUILD_NRC
             // This vertex was chosen as the NRC query vertex (see the
@@ -352,12 +398,15 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
             // matching Muller et al. 2021's 64-wide input layer 1:1. Inputs
             // are stored column-major: kNRCInputDims raw floats per slot
             // (encoding to the full 64 dims happens in nrc_config.json),
-            // pixelIndex==slot. Only paths selected as NRC training paths
-            // (nrcTrainingPath, set in GenerateCameraRays -- 1 out of every
-            // 32, or all of them during the final inference sweep) actually
-            // write a record; other paths still ran the heuristic above (to
-            // match Muller et al.'s termination rule) but don't capture.
-            if (nrcCaptureNow && nrcTrainingPath[w.pixelIndex]) {
+            // pixelIndex==slot. The row is written for every path that
+            // reached its query vertex (needed so NRCInferenceForRenderPaths
+            // can query the cache for non-training paths too); nrcValid,
+            // which additionally gates training, is only set for paths
+            // selected as NRC training paths (nrcTrainingPath, set in
+            // GenerateCameraRays -- 1 out of every 32, or all of them during
+            // the final inference sweep). nrcRenderQuery marks the rows that
+            // still need a render-time cache substitution this pass.
+            if (nrcCaptureNow) {
                 // Albedo: hemispherical-directional reflectance.
                 constexpr int nRhoSamples = 16;
                 const Float ucRho[nRhoSamples] = {
@@ -417,11 +466,15 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                 // dims 47-48: padding, constant 1 (paper pads to 64 for tile alignment)
                 row[47] = 1.f;
                 row[48] = 1.f;
-                nrcValid[w.pixelIndex] = 1;
+                if (nrcTrainingPath[w.pixelIndex])
+                    nrcValid[w.pixelIndex] = 1;
+                if (nrcTerminateAndSubstitute)
+                    nrcRenderQuery[w.pixelIndex] = 1;
             }
 #endif
 
 
+            if (!nrcTerminateAndSubstitute) {
             // Sample light and enqueue shadow ray at intersection point
             BxDFFlags flags = bsdf.Flags();
             if (IsNonSpecular(flags)) {
@@ -487,6 +540,7 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                          SafeDiv(Ld, r_u)[1], SafeDiv(Ld, r_u)[2],
                          SafeDiv(Ld, r_u)[3]);
             }
+            }  // !nrcTerminateAndSubstitute
         });
 }
 

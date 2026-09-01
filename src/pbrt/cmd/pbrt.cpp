@@ -60,6 +60,7 @@ Rendering options:
   --mse-reference-image         Filename for reference image to use for MSE computation.
   --mse-reference-out           File to write MSE error vs spp results.
   --nrc-train-steps <n>         NRC gradient steps per scanline pass. (Default: 2)
+  --nrc-warmup-samples <n>      Scanline passes trained before render-time substitution engages. (Default: 16)
   --nrc-config <path>           Path to tcnn JSON config file for the NRC network.
                                 (Default: built-in 64-wide 3-layer MLP)
   --nrc-output <path>           Save path for the NRC predicted image. (Default: nrc_predicted.exr)
@@ -193,6 +194,7 @@ int main(int argc, char *argv[]) {
             ParseArg(&iter, args.end(), "mse-reference-out", &options.mseReferenceOutput,
                      onError) ||
             ParseArg(&iter, args.end(), "nrc-train-steps", &options.nrcTrainSteps, onError) ||
+            ParseArg(&iter, args.end(), "nrc-warmup-samples", &options.nrcWarmupSamples, onError) ||
             ParseArg(&iter, args.end(), "nrc-config", &options.nrcConfigFile, onError) ||
             ParseArg(&iter, args.end(), "nrc-output", &options.nrcOutputFile, onError) ||
             ParseArg(&iter, args.end(), "enable-nrc", &options.enableNRC, onError) ||

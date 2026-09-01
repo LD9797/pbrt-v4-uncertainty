@@ -29,10 +29,28 @@ void WavefrontPathIntegrator::UpdateFilm() {
             Float filterWeight = pixelSampleState.filterWeight[pixelIndex];
 
 #ifdef PBRT_BUILD_NRC
-            // Pair this sample's final radiance with its captured first-hit input row.
+            // Pair this sample's continuation-only radiance with its
+            // captured query-vertex input row. The path kept tracing past
+            // its query vertex (training paths never terminate early -- see
+            // surfscatter.cpp), so pixelSampleState.L now also holds
+            // whatever was accumulated after that vertex. Subtract off the
+            // nrcSnapshotL taken right before the vertex's own shading to
+            // isolate that continuation, then divide by the throughput that
+            // reached the vertex (nrcSnapshotBeta) so the target is the
+            // vertex's local outgoing radiance, independent of path-specific
+            // throughput -- matching what NRCInferenceForRenderPaths()
+            // substitutes at render time (nrcSnapshotL + nrcSnapshotBeta *
+            // predicted).
             if (nrcTargets != nullptr && nrcValid != nullptr &&
                 nrcValid[pixelIndex]) {
-                RGB rgb = film.ToOutputRGB(Lw, lambda);
+                SampledSpectrum Lraw = pixelSampleState.L[pixelIndex];
+                SampledSpectrum Lsnapshot, betaSnapshot;
+                for (int c = 0; c < NSpectrumSamples; ++c) {
+                    Lsnapshot[c] = nrcSnapshotL[size_t(pixelIndex) * NSpectrumSamples + c];
+                    betaSnapshot[c] = nrcSnapshotBeta[size_t(pixelIndex) * NSpectrumSamples + c];
+                }
+                SampledSpectrum Lo = SafeDiv(Lraw - Lsnapshot, betaSnapshot);
+                RGB rgb = film.ToOutputRGB(Lo, lambda);
                 float *t = nrcTargets +
                            size_t(pixelIndex) * kNRCOutputDims;
                 t[0] = float(rgb.r);

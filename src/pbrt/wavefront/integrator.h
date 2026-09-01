@@ -225,7 +225,27 @@ class WavefrontPathIntegrator {
     //     stops that path's spread tracking from running again at later
     //     vertices, independent of whether a training record gets written
     //   nrcTrainingPath: 1 byte per slot, set by GenerateCameraRays before the
-    //     first hit is even traced. 
+    //     first hit is even traced.
+    //   nrcRenderQuery: 1 byte per slot, set when a *non-training* path's
+    //     query vertex was chosen by the area-spread heuristic itself or by
+    //     max-depth truncation (NOT by Russian roulette or an invalid BSDF
+    //     sample, since those are natural dead ends with no expensive
+    //     continuation left to approximate). Such paths skip their indirect
+    //     bounce and NEE at that vertex; NRCInferenceForRenderPaths() queries
+    //     the cache for all of them once per scanline pass (after the depth
+    //     loop, before UpdateFilm()) and adds beta * predicted radiance into
+    //     L, replacing the skipped continuation with Muller et al.'s cache
+    //     estimate.
+    //   nrcSnapshotBeta/nrcSnapshotL: NSpectrumSamples floats per slot,
+    //     captured the moment a path's query vertex is found (whichever of
+    //     the four ways above), regardless of training/render status.
+    //     nrcSnapshotBeta is the path throughput arriving at that vertex
+    //     (before any of its own scattering); nrcSnapshotL is pixelSampleState
+    //     .L just before that vertex's own NEE runs. UpdateFilm() uses both to
+    //     turn the full-path Lw into a continuation-only, throughput-
+    //     normalized training target: (Lw - nrcSnapshotL) / nrcSnapshotBeta,
+    //     matching what NRCInferenceForRenderPaths() substitutes at render
+    //     time (nrcSnapshotL + nrcSnapshotBeta * predicted).
     static constexpr uint32_t kNRCInputDims = 49;
     static constexpr uint32_t kNRCOutputDims = 3;
     // Muller et al. 2021 Sec. 3.4 "Path Termination": all paths are
@@ -254,6 +274,9 @@ class WavefrontPathIntegrator {
     float *nrcCompactInputs  = nullptr;  // valid-only training inputs, compacted each pass
     float *nrcCompactTargets = nullptr;  // valid-only training targets, compacted each pass
     float *nrcInferenceOutputs = nullptr;  // scratch for per-step inference
+    uint8_t *nrcRenderQuery = nullptr;   // 1 = non-training path terminated at its query vertex this pass; needs cache substitution
+    float *nrcSnapshotBeta = nullptr;    // NSpectrumSamples floats/slot: path throughput arriving at the query vertex
+    float *nrcSnapshotL = nullptr;       // NSpectrumSamples floats/slot: L accumulated strictly before the query vertex's own shading
     // Persistent per-pixel predicted RGB image (sized to film resolution).
     // Populated by per-sample inference passes; written to EXR at end of Render().
     float *nrcPredictedRGB = nullptr;
@@ -261,10 +284,17 @@ class WavefrontPathIntegrator {
     nrc::NeuralRadianceCache *nrcCache = nullptr;
     int nrcSampleCounter = 0;
     float nrcLastLoss = 0.f;
+    // False until nrcSampleCounter reaches Options->nrcWarmupSamples; while
+    // false, nrcTerminateAndSubstitute (surfscatter.cpp) never fires, so
+    // every path traces to completion for real and only trains the cache --
+    // avoids baking an untrained network's predictions permanently into the
+    // progressively-accumulated film.
+    bool nrcWarmedUp = false;
 
     void NRCResetSampleBuffers();
     void NRCCaptureFinalRadiance();
     void NRCTrainAndInferStep();
+    void NRCInferenceForRenderPaths();
     void NRCDumpPredictedImage(const std::string &filename);
 #endif  // PBRT_BUILD_NRC
 };
