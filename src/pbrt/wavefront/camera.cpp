@@ -72,7 +72,6 @@ void WavefrontPathIntegrator::GenerateCameraRays(int y0, Transform movingFromCam
                 pixelSampleState.visibleSurface[pixelIndex] = VisibleSurface();
 
 #ifdef PBRT_BUILD_NRC
-            // Select 1 out of every 32 paths to be an NRC training path.
             if (nrcTrainingPath != nullptr) {
                 constexpr int tileW = 8;
                 constexpr int tileH = 4;

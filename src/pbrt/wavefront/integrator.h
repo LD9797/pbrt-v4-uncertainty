@@ -295,10 +295,56 @@ class WavefrontPathIntegrator {
     // progressively-accumulated film.
     bool nrcWarmedUp = false;
 
+    // ---- Training-suffix self-training (Muller et al. Sec. 3 / Fig. 4) ----
+    // A training path never terminates at its render-query vertex (it never
+    // did). What's new here: the continuation past that vertex is now
+    // explicitly tracked as a short "training suffix". The SAME area-spread
+    // heuristic (Eq. 3/4) is re-applied independently to the suffix, treating
+    // the render-query vertex as a new "primary vertex" for that second test,
+    // with a hard cap of kNRCMaxSuffixLen extra vertices as a GPU-memory
+    // safety net. When the suffix ends via its own heuristic/cap, a bootstrap
+    // NRC query supplies the missing continuation; when it ends naturally
+    // (invalid BSDF sample / Russian roulette), no bootstrap is needed. From
+    // there, NRCTrainingSuffixFinish() walks the suffix backward, turning
+    // that single prediction (or zero, for a natural end) into one training
+    // record per suffix vertex. To avoid ever dividing by a possibly-tiny
+    // throughput (the bug that caused the earlier over-bright render), the
+    // suffix tracks its OWN local throughput (nrcSuffixBeta), reset to 1.0 at
+    // the render-query vertex and updated purely by forward multiplication --
+    // never by dividing the real path's beta.
+    //
+    // Known, deliberate scope limitations:
+    //  - NEE/shadow rays are NOT tracked for suffix vertices (would require
+    //    threading new fields through ShadowRayWorkItem across both the CPU
+    //    and OptiX shadow-ray kernels); suffix local radiance comes only from
+    //    BSDF-sampled continuation and emission hits.
+    //  - If the render-query vertex itself (suffix slot 0) lies on an
+    //    emitter, that emission is not captured in the suffix's target for
+    //    slot 0 (HandleEmissiveIntersection runs before the same vertex's
+    //    surfscatter.cpp call that activates suffix tracking).
+    //  - Training paths whose query vertex is itself a natural dead end
+    //    (invalid BSDF sample / RR-kill) get no suffix and no training
+    //    record this pass (a single-vertex record there is always zero, so
+    //    dropping it loses nothing).
+    static constexpr uint32_t kNRCMaxSuffixLen = 4;
+    uint8_t *nrcSuffixActive = nullptr;   // 1 = training path is currently in its suffix; cleared once bootstrap-terminated
+    uint8_t *nrcSuffixLen = nullptr;      // number of finalized suffix vertices (valid slots 0..nrcSuffixLen-1)
+    uint8_t *nrcSuffixTerminatedByHeuristic = nullptr;  // 1 = suffix ended via its own heuristic/cap (needs a bootstrap query); 0 = natural end
+    float *nrcSuffixBeta = nullptr;        // NSpectrumSamples floats/slot: local suffix throughput, reset to 1 at the render-query vertex
+    float *nrcSuffixSpreadAccum = nullptr; // suffix's own independent Eq. 3 accumulator
+    float *nrcSuffixA0 = nullptr;          // suffix's own independent Eq. 4 baseline, from the real vertex before the render-query vertex to it
+    float *nrcSuffixInputs = nullptr;      // kNRCMaxSuffixLen*kNRCInputDims floats/slot: per-suffix-vertex input feature rows (incl. the bootstrap-only row)
+    float *nrcSuffixLocal = nullptr;       // kNRCMaxSuffixLen*NSpectrumSamples floats/slot: per-suffix-vertex local (beta=1-frame) emission contribution
+    float *nrcSuffixStep = nullptr;        // kNRCMaxSuffixLen*NSpectrumSamples floats/slot: per-suffix-vertex step factor (f*cos/pdf) to the next vertex
+    float *nrcSuffixTarget = nullptr;      // kNRCMaxSuffixLen*kNRCOutputDims floats/slot: backward-propagated RGB target, filled by NRCTrainingSuffixFinish()
+    float *nrcSuffixBootstrapInputs = nullptr;  // nrcBatchSize*kNRCInputDims scratch: bootstrap rows gathered contiguously for one Inference() call
+    uint32_t nrcCompactCapacity = 0;       // capacity of nrcCompactInputs/nrcCompactTargets in rows (> nrcBatchSize to allow room for suffix records)
+
     void NRCResetSampleBuffers();
     void NRCCaptureFinalRadiance();
     void NRCTrainAndInferStep();
     void NRCInferenceForRenderPaths();
+    void NRCTrainingSuffixFinish();
     void NRCDumpPredictedImage(const std::string &filename);
 #endif  // PBRT_BUILD_NRC
 };

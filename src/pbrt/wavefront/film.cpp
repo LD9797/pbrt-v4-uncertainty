@@ -29,34 +29,16 @@ void WavefrontPathIntegrator::UpdateFilm() {
             Float filterWeight = pixelSampleState.filterWeight[pixelIndex];
 
 #ifdef PBRT_BUILD_NRC
-            // Pair this sample's continuation-only radiance with its
-            // captured query-vertex input row. The path kept tracing past
-            // its query vertex (training paths never terminate early -- see
-            // surfscatter.cpp), so pixelSampleState.L now also holds
-            // whatever was accumulated after that vertex. Subtract off the
-            // nrcSnapshotL taken right before the vertex's own shading to
-            // isolate that continuation. Deliberately NOT dividing by the
-            // throughput that reached the vertex (nrcSnapshotBeta): that
-            // division blows up whenever betaSnapshot is small, producing
-            // huge targets/predictions and a wildly over-bright image. The
-            // target is therefore the raw (still throughput-weighted)
-            // continuation contribution, matching what
-            // NRCInferenceForRenderPaths() adds directly at render time
-            // (nrcSnapshotL + predicted, no beta multiply).
-            if (nrcTargets != nullptr && nrcValid != nullptr &&
-                nrcValid[pixelIndex]) {
-                SampledSpectrum Lraw = pixelSampleState.L[pixelIndex];
-                SampledSpectrum Lsnapshot;
-                for (int c = 0; c < NSpectrumSamples; ++c)
-                    Lsnapshot[c] = nrcSnapshotL[size_t(pixelIndex) * NSpectrumSamples + c];
-                SampledSpectrum Lo = Lraw - Lsnapshot;
-                RGB rgb = film.ToOutputRGB(Lo, lambda);
-                float *t = nrcTargets +
-                           size_t(pixelIndex) * kNRCOutputDims;
-                t[0] = float(rgb.r);
-                t[1] = float(rgb.g);
-                t[2] = float(rgb.b);
-            }
+            // Training-path supervision no longer comes from here. Every
+            // training path that reaches its render-query vertex now gets
+            // an explicit "training suffix" (see surfscatter.cpp's
+            // nrcSuffixActive tracking, integrator.cpp's
+            // NRCTrainingSuffixFinish()): one backward-propagated record per
+            // suffix vertex, built purely by forward multiplication of a
+            // local (reset-to-1) throughput, never by dividing the real
+            // path's beta. nrcValid is therefore never set for training
+            // paths anymore; it's reserved for non-training (render-query)
+            // paths' inference-only use in NRCInferenceForRenderPaths().
 #endif
 
             if (initializeVisibleSurface) {

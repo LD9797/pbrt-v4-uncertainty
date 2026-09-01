@@ -321,10 +321,19 @@ WavefrontPathIntegrator::WavefrontPathIntegrator(
         cudaMemset(nrcPathA0, 0, sizeof(float) * nrcBatchSize);
         cudaMemset(nrcPathPrevP, 0, sizeof(Point3f) * nrcBatchSize);
         cudaMemset(nrcPathPrevPdf, 0, sizeof(float) * nrcBatchSize);
+        // Compacted training buffers need room for more than one record per
+        // pixel now that training paths contribute a whole suffix of
+        // records instead of just one. At most 1/32 of paths are ever
+        // selected as training paths (see nrcTrainingPath selection below),
+        // so 2x nrcBatchSize comfortably covers the worst case
+        // (nrcBatchSize/32 * (1 + kNRCMaxSuffixLen)) with a lot of margin,
+        // without paying for the full 5x (nrcBatchSize * (1+kNRCMaxSuffixLen))
+        // bound that would apply if every path were a training path.
+        nrcCompactCapacity = 2 * nrcBatchSize;
         cudaMallocManaged(&nrcCompactInputs,
-                          sizeof(float) * kNRCInputDims * nrcBatchSize);
+                          sizeof(float) * kNRCInputDims * nrcCompactCapacity);
         cudaMallocManaged(&nrcCompactTargets,
-                          sizeof(float) * kNRCOutputDims * nrcBatchSize);
+                          sizeof(float) * kNRCOutputDims * nrcCompactCapacity);
         cudaMallocManaged(&nrcInferenceOutputs,
                           sizeof(float) * kNRCOutputDims * nrcBatchSize);
         cudaMemset(nrcInferenceOutputs, 0,
@@ -339,6 +348,48 @@ WavefrontPathIntegrator::WavefrontPathIntegrator(
                    sizeof(float) * NSpectrumSamples * nrcBatchSize);
         cudaMemset(nrcSnapshotL, 0,
                    sizeof(float) * NSpectrumSamples * nrcBatchSize);
+
+        // Training-suffix buffers (see integrator.h for the full design
+        // rationale). nrcSuffixInputs/Local/Step are sized per-pixel *
+        // kNRCMaxSuffixLen; nrcSuffixTarget is the same shape but in RGB
+        // (kNRCOutputDims) rather than spectral (NSpectrumSamples) since it
+        // is the final, already-converted per-record training target.
+        cudaMallocManaged(&nrcSuffixActive, sizeof(uint8_t) * nrcBatchSize);
+        cudaMallocManaged(&nrcSuffixLen, sizeof(uint8_t) * nrcBatchSize);
+        cudaMallocManaged(&nrcSuffixTerminatedByHeuristic,
+                          sizeof(uint8_t) * nrcBatchSize);
+        cudaMallocManaged(&nrcSuffixBeta,
+                          sizeof(float) * NSpectrumSamples * nrcBatchSize);
+        cudaMallocManaged(&nrcSuffixSpreadAccum, sizeof(float) * nrcBatchSize);
+        cudaMallocManaged(&nrcSuffixA0, sizeof(float) * nrcBatchSize);
+        cudaMallocManaged(&nrcSuffixInputs, sizeof(float) * kNRCInputDims *
+                                                kNRCMaxSuffixLen * nrcBatchSize);
+        cudaMallocManaged(&nrcSuffixLocal, sizeof(float) * NSpectrumSamples *
+                                               kNRCMaxSuffixLen * nrcBatchSize);
+        cudaMallocManaged(&nrcSuffixStep, sizeof(float) * NSpectrumSamples *
+                                              kNRCMaxSuffixLen * nrcBatchSize);
+        cudaMallocManaged(&nrcSuffixTarget, sizeof(float) * kNRCOutputDims *
+                                                kNRCMaxSuffixLen * nrcBatchSize);
+        cudaMallocManaged(&nrcSuffixBootstrapInputs,
+                          sizeof(float) * kNRCInputDims * nrcBatchSize);
+        cudaMemset(nrcSuffixActive, 0, sizeof(uint8_t) * nrcBatchSize);
+        cudaMemset(nrcSuffixLen, 0, sizeof(uint8_t) * nrcBatchSize);
+        cudaMemset(nrcSuffixTerminatedByHeuristic, 0,
+                   sizeof(uint8_t) * nrcBatchSize);
+        cudaMemset(nrcSuffixBeta, 0, sizeof(float) * NSpectrumSamples * nrcBatchSize);
+        cudaMemset(nrcSuffixSpreadAccum, 0, sizeof(float) * nrcBatchSize);
+        cudaMemset(nrcSuffixA0, 0, sizeof(float) * nrcBatchSize);
+        cudaMemset(nrcSuffixInputs, 0,
+                   sizeof(float) * kNRCInputDims * kNRCMaxSuffixLen * nrcBatchSize);
+        cudaMemset(nrcSuffixLocal, 0,
+                   sizeof(float) * NSpectrumSamples * kNRCMaxSuffixLen * nrcBatchSize);
+        cudaMemset(nrcSuffixStep, 0,
+                   sizeof(float) * NSpectrumSamples * kNRCMaxSuffixLen * nrcBatchSize);
+        cudaMemset(nrcSuffixTarget, 0,
+                   sizeof(float) * kNRCOutputDims * kNRCMaxSuffixLen * nrcBatchSize);
+        cudaMemset(nrcSuffixBootstrapInputs, 0,
+                   sizeof(float) * kNRCInputDims * nrcBatchSize);
+
         nrcCache = new nrc::NeuralRadianceCache(nrcBatchSize, kNRCInputDims,
                                                 kNRCOutputDims,
                                                 Options->nrcConfigFile);
@@ -448,6 +499,20 @@ Float WavefrontPathIntegrator::Render() {
                    "Update camera ray stats",
                    PBRT_CPU_GPU_LAMBDA() { stats->cameraRays += cameraRayQueue->Size(); });
 
+#ifdef PBRT_BUILD_NRC
+                // Give training paths room to run a training suffix past
+                // maxDepth: without this, a query vertex found right at
+                // maxDepth-1 would have no budget left for a suffix at all.
+                // Only extended once warmed up (during warm-up every path
+                // traces to completion for real anyway, so maxDepth already
+                // governs the real image; extending it there too would
+                // silently change --maxdepth semantics for everyone).
+                int maxWavefrontDepth =
+                    (nrcCache && nrcWarmedUp) ? maxDepth + (int)kNRCMaxSuffixLen : maxDepth;
+#else
+                int maxWavefrontDepth = maxDepth;
+#endif
+
                 // Trace rays and estimate radiance up to maximum ray depth
                 for (int wavefrontDepth = 0; true; ++wavefrontDepth) {
                     // Reset queues before tracing rays
@@ -498,7 +563,7 @@ Float WavefrontPathIntegrator::Render() {
 
                     HandleEmissiveIntersection();
 
-                    if (wavefrontDepth == maxDepth)
+                    if (wavefrontDepth == maxWavefrontDepth)
                         break;
 
                     EvaluateMaterialsAndBSDFs(wavefrontDepth, cameraMotion);
@@ -519,6 +584,10 @@ Float WavefrontPathIntegrator::Render() {
                 UpdateFilm();
 
 #ifdef PBRT_BUILD_NRC
+                // Bootstrap-query and backward-propagate this pass's
+                // training suffixes into per-vertex records before
+                // compacting/training on them.
+                NRCTrainingSuffixFinish();
                 // Current scanline pass has finished gathering valid training samples.
                 NRCTrainAndInferStep();
 #endif
@@ -716,6 +785,41 @@ void WavefrontPathIntegrator::HandleEmissiveIntersection() {
 
             PBRT_DBG("Added L %f %f %f %f for pixel index %d\n", L[0], L[1], L[2], L[3],
                      w.pixelIndex);
+
+#ifdef PBRT_BUILD_NRC
+            // Parallel, throughput-independent copy of the same
+            // contribution for the training suffix (if this vertex is part
+            // of one): same MIS math, but scaled by the suffix's own local
+            // beta (reset to 1 at the render-query vertex) instead of the
+            // real w.beta, so it can never blow up from a tiny real
+            // throughput. Written into whichever slot this vertex
+            // currently occupies (nrcSuffixLen hasn't advanced for this
+            // vertex yet -- that happens in surfscatter.cpp, which runs
+            // after this kernel for the same wavefront depth).
+            if (nrcSuffixActive[w.pixelIndex]) {
+                SampledSpectrum suffixBeta;
+                for (int c = 0; c < NSpectrumSamples; ++c)
+                    suffixBeta[c] = nrcSuffixBeta[w.pixelIndex * NSpectrumSamples + c];
+                SampledSpectrum Llocal(0.f);
+                if (w.depth == 0 || w.specularBounce) {
+                    Llocal = suffixBeta * Le / w.r_u.Average();
+                } else {
+                    Vector3f wiLocal = -w.wo;
+                    LightSampleContext ctxLocal = w.prevIntrCtx;
+                    Float lightChoicePDFLocal = lightSampler.PMF(ctxLocal, w.areaLight);
+                    Float lightPDFLocal =
+                        lightChoicePDFLocal * w.areaLight.PDF_Li(ctxLocal, wiLocal, true);
+                    SampledSpectrum r_uLocal = w.r_u;
+                    SampledSpectrum r_lLocal = w.r_l * lightPDFLocal;
+                    Llocal = suffixBeta * Le / (r_uLocal + r_lLocal).Average();
+                }
+                uint32_t slot = nrcSuffixLen[w.pixelIndex];
+                for (int c = 0; c < NSpectrumSamples; ++c)
+                    nrcSuffixLocal[(size_t(w.pixelIndex) * kNRCMaxSuffixLen + slot) *
+                                       NSpectrumSamples +
+                                   c] = Llocal[c];
+            }
+#endif
 
             // Update _L_ in _PixelSampleState_ for area light's radiance
             L += pixelSampleState.L[w.pixelIndex];
@@ -941,6 +1045,11 @@ void WavefrontPathIntegrator::NRCResetSampleBuffers() {
     uint8_t *renderQuery = nrcRenderQuery;
     float *spreadAccum = nrcPathSpreadAccum;
     float *a0 = nrcPathA0;
+    uint8_t *suffixActive = nrcSuffixActive;
+    uint8_t *suffixLen = nrcSuffixLen;
+    uint8_t *suffixTerminatedByHeuristic = nrcSuffixTerminatedByHeuristic;
+    float *suffixSpreadAccum = nrcSuffixSpreadAccum;
+    float *suffixA0 = nrcSuffixA0;
     const uint32_t batch = nrcBatchSize;
     ParallelFor(
         "NRC reset", batch, PBRT_CPU_GPU_LAMBDA(int i) {
@@ -950,6 +1059,11 @@ void WavefrontPathIntegrator::NRCResetSampleBuffers() {
             renderQuery[i] = 0;
             spreadAccum[i] = 0.f;
             a0[i] = 0.f;
+            suffixActive[i] = 0;
+            suffixLen[i] = 0;
+            suffixTerminatedByHeuristic[i] = 0;
+            suffixSpreadAccum[i] = 0.f;
+            suffixA0[i] = 0.f;
             for (int c = 0; c < (int)kNRCInputDims; ++c)
                 inputs[i * (int)kNRCInputDims + c] = 0.f;
             for (int c = 0; c < (int)kNRCOutputDims; ++c)
@@ -996,7 +1110,7 @@ void WavefrontPathIntegrator::NRCTrainAndInferStep() {
     // One Adam/L2 training step over valid samples only. Compact them into a
     // contiguous prefix first so tcnn never sees the zero-padded invalid slots.
     uint32_t nValid = 0;
-    for (uint32_t i = 0; i < nrcBatchSize; ++i) {
+    for (uint32_t i = 0; i < nrcBatchSize && nValid < nrcCompactCapacity; ++i) {
         if (!nrcValid[i]) continue;
         std::memcpy(nrcCompactInputs  + nValid * kNRCInputDims,
                     nrcInputs          + i      * kNRCInputDims,
@@ -1006,6 +1120,23 @@ void WavefrontPathIntegrator::NRCTrainAndInferStep() {
         for (uint32_t c = 0; c < kNRCOutputDims; ++c)
             dst[c] = std::max(0.f, src[c]); //dst[c] = std::log1p(std::max(0.f, src[c]));  // clamp: ToOutputRGB can return negative for out-of-gamut spectra
         ++nValid;
+    }
+    // Training-suffix records: each training path can contribute up to
+    // kNRCMaxSuffixLen records (one per finalized suffix vertex), already
+    // backward-propagated and RGB-converted by NRCTrainingSuffixFinish().
+    for (uint32_t i = 0; i < nrcBatchSize && nValid < nrcCompactCapacity; ++i) {
+        uint32_t m = nrcSuffixLen[i];
+        for (uint32_t s = 0; s < m && nValid < nrcCompactCapacity; ++s) {
+            std::memcpy(nrcCompactInputs + nValid * kNRCInputDims,
+                        nrcSuffixInputs + (size_t(i) * kNRCMaxSuffixLen + s) * kNRCInputDims,
+                        kNRCInputDims * sizeof(float));
+            float *dst = nrcCompactTargets + nValid * kNRCOutputDims;
+            const float *src =
+                nrcSuffixTarget + (size_t(i) * kNRCMaxSuffixLen + s) * kNRCOutputDims;
+            for (uint32_t c = 0; c < kNRCOutputDims; ++c)
+                dst[c] = std::max(0.f, src[c]);
+            ++nValid;
+        }
     }
 
     const int kNRCTrainSteps = Options->nrcTrainSteps;
@@ -1031,6 +1162,95 @@ void WavefrontPathIntegrator::NRCTrainAndInferStep() {
         if (nValid > 0)
             LogNRCMagnitudeStats("target", nrcCompactTargets, nValid);
     }
+}
+
+void WavefrontPathIntegrator::NRCTrainingSuffixFinish() {
+    if (!nrcCache)
+        return;
+    // Ensure surfscatter.cpp/integrator.cpp's suffix writes for this pass
+    // (nrcSuffixInputs/Local/Step/Len/TerminatedByHeuristic) are visible.
+    cudaDeviceSynchronize();
+
+    // Gather each heuristic/cap-terminated suffix's bootstrap-vertex
+    // features into a batch-contiguous scratch buffer (one row per pixel,
+    // zero elsewhere) so the network can be queried with a single
+    // Inference() call instead of one per suffix.
+    {
+        float *bootstrapInputs = nrcSuffixBootstrapInputs;
+        const float *suffixInputs = nrcSuffixInputs;
+        const uint8_t *terminatedByHeuristic = nrcSuffixTerminatedByHeuristic;
+        const uint8_t *suffixLen = nrcSuffixLen;
+        const uint32_t cap = kNRCMaxSuffixLen;
+        const uint32_t batch = nrcBatchSize;
+        ParallelFor(
+            "NRC suffix bootstrap gather", batch, PBRT_CPU_GPU_LAMBDA(int i) {
+                float *dst = bootstrapInputs + size_t(i) * kNRCInputDims;
+                if (!terminatedByHeuristic[i]) {
+                    for (int c = 0; c < (int)kNRCInputDims; ++c)
+                        dst[c] = 0.f;
+                    return;
+                }
+                // The bootstrap-only row lives one slot past the last
+                // finalized suffix vertex (see surfscatter.cpp).
+                const float *src =
+                    suffixInputs + (size_t(i) * cap + suffixLen[i]) * kNRCInputDims;
+                for (int c = 0; c < (int)kNRCInputDims; ++c)
+                    dst[c] = src[c];
+            });
+    }
+    cudaDeviceSynchronize();
+    // Reuse nrcInferenceOutputs as scratch: NRCInferenceForRenderPaths()
+    // already consumed its previous contents earlier this pass.
+    nrcCache->Inference(nrcSuffixBootstrapInputs, nrcInferenceOutputs);
+    cudaDeviceSynchronize();
+
+    // Walk each training suffix backward from its last finalized vertex to
+    // the render-query vertex (slot 0), seeding the recursion with the
+    // bootstrap prediction (heuristic/cap end) or zero (natural end -- the
+    // last vertex's own local contribution needs no continuation). Every
+    // step here is a plain multiply-add in spectral space; nothing is ever
+    // divided by a throughput.
+    {
+        const uint8_t *terminatedByHeuristic = nrcSuffixTerminatedByHeuristic;
+        const uint8_t *suffixLen = nrcSuffixLen;
+        const float *local = nrcSuffixLocal;
+        const float *step = nrcSuffixStep;
+        float *target = nrcSuffixTarget;
+        const float *bootstrapOutputs = nrcInferenceOutputs;
+        auto *psState = &pixelSampleState;
+        const RGBColorSpace *colorSpace = RGBColorSpace::sRGB;
+        const uint32_t cap = kNRCMaxSuffixLen;
+        const uint32_t batch = nrcBatchSize;
+        ParallelFor(
+            "NRC suffix backward propagation", batch, PBRT_CPU_GPU_LAMBDA(int i) {
+                uint32_t m = suffixLen[i];
+                if (m == 0)
+                    return;
+                SampledWavelengths lambda = psState->lambda[i];
+                SampledSpectrum Lnext(0.f);
+                if (terminatedByHeuristic[i]) {
+                    RGB rgb(std::max(0.f, bootstrapOutputs[i * (int)kNRCOutputDims + 0]),
+                            std::max(0.f, bootstrapOutputs[i * (int)kNRCOutputDims + 1]),
+                            std::max(0.f, bootstrapOutputs[i * (int)kNRCOutputDims + 2]));
+                    Lnext = RGBUnboundedSpectrum(*colorSpace, rgb).Sample(lambda);
+                }
+                for (int s = int(m) - 1; s >= 0; --s) {
+                    SampledSpectrum localS, stepS;
+                    for (int c = 0; c < NSpectrumSamples; ++c) {
+                        localS[c] = local[(size_t(i) * cap + s) * NSpectrumSamples + c];
+                        stepS[c] = step[(size_t(i) * cap + s) * NSpectrumSamples + c];
+                    }
+                    SampledSpectrum Ls = localS + stepS * Lnext;
+                    RGB rgb = film.ToOutputRGB(Ls, lambda);
+                    float *t = target + (size_t(i) * cap + s) * kNRCOutputDims;
+                    t[0] = float(rgb.r);
+                    t[1] = float(rgb.g);
+                    t[2] = float(rgb.b);
+                    Lnext = Ls;
+                }
+            });
+    }
+    cudaDeviceSynchronize();
 }
 
 void WavefrontPathIntegrator::NRCInferenceForRenderPaths() {
