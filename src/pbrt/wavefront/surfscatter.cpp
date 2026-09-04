@@ -256,6 +256,15 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                     nrcSuffixA0[w.pixelIndex] =
                         d1Sq / (4 * Pi * std::max<Float>(cosSuffixHere, 1e-6f));
                     nrcSuffixSpreadAccum[w.pixelIndex] = 0.f;
+                    // Seed the suffix's OWN previous-vertex state from the
+                    // render path's here (the vertex just before the
+                    // render-query vertex, which IS the right "previous
+                    // vertex" for the suffix's first segment) -- then it
+                    // evolves completely independently of nrcPathPrevP/Pdf
+                    // from here on, since the render path keeps updating
+                    // those for its OWN (now-dormant) heuristic.
+                    nrcSuffixPrevP[w.pixelIndex] = nrcPathPrevP[w.pixelIndex];
+                    nrcSuffixPrevPdf[w.pixelIndex] = nrcPathPrevPdf[w.pixelIndex];
                 }
             }
 
@@ -277,8 +286,8 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                 if (nrcSuffixSlot > 0) {
                     Point3f p(w.pi);
                     Float cosThetaHere = AbsDot(w.wo, ns);
-                    Float dSq = DistanceSquared(nrcPathPrevP[w.pixelIndex], p);
-                    Float pdfPrev = std::max<Float>(nrcPathPrevPdf[w.pixelIndex], 1e-6f);
+                    Float dSq = DistanceSquared(nrcSuffixPrevP[w.pixelIndex], p);
+                    Float pdfPrev = std::max<Float>(nrcSuffixPrevPdf[w.pixelIndex], 1e-6f);
                     Float term =
                         std::sqrt(dSq / (pdfPrev * std::max<Float>(cosThetaHere, 1e-6f)));
                     Float accum = nrcSuffixSpreadAccum[w.pixelIndex] + term;
@@ -505,6 +514,18 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                                                NSpectrumSamples +
                                            c] = 0.f;
                         }
+                        // Advance the suffix's OWN previous-vertex state
+                        // (independent of nrcPathPrevP/Pdf, which belong to
+                        // the render path's now-dormant heuristic) so the
+                        // NEXT suffix vertex's Eq. 3 segment measures
+                        // distance/pdf from THIS vertex, not from wherever
+                        // the render path happened to be before the
+                        // render-query vertex.
+                        nrcSuffixPrevP[w.pixelIndex] = Point3f(w.pi);
+                        nrcSuffixPrevPdf[w.pixelIndex] =
+                            bsdfSample->pdfIsProportional
+                                ? bsdf.PDF<ConcreteBxDF>(wo, bsdfSample->wi)
+                                : bsdfSample->pdf;
                         nrcSuffixLen[w.pixelIndex] = nextSlot;
                     }
 #endif

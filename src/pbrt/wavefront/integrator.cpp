@@ -362,6 +362,8 @@ WavefrontPathIntegrator::WavefrontPathIntegrator(
                           sizeof(float) * NSpectrumSamples * nrcBatchSize);
         cudaMallocManaged(&nrcSuffixSpreadAccum, sizeof(float) * nrcBatchSize);
         cudaMallocManaged(&nrcSuffixA0, sizeof(float) * nrcBatchSize);
+        cudaMallocManaged(&nrcSuffixPrevP, sizeof(Point3f) * nrcBatchSize);
+        cudaMallocManaged(&nrcSuffixPrevPdf, sizeof(float) * nrcBatchSize);
         cudaMallocManaged(&nrcSuffixInputs, sizeof(float) * kNRCInputDims *
                                                 kNRCMaxSuffixLen * nrcBatchSize);
         cudaMallocManaged(&nrcSuffixLocal, sizeof(float) * NSpectrumSamples *
@@ -379,6 +381,8 @@ WavefrontPathIntegrator::WavefrontPathIntegrator(
         cudaMemset(nrcSuffixBeta, 0, sizeof(float) * NSpectrumSamples * nrcBatchSize);
         cudaMemset(nrcSuffixSpreadAccum, 0, sizeof(float) * nrcBatchSize);
         cudaMemset(nrcSuffixA0, 0, sizeof(float) * nrcBatchSize);
+        cudaMemset(nrcSuffixPrevP, 0, sizeof(Point3f) * nrcBatchSize);
+        cudaMemset(nrcSuffixPrevPdf, 0, sizeof(float) * nrcBatchSize);
         cudaMemset(nrcSuffixInputs, 0,
                    sizeof(float) * kNRCInputDims * kNRCMaxSuffixLen * nrcBatchSize);
         cudaMemset(nrcSuffixLocal, 0,

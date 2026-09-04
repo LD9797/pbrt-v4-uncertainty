@@ -333,6 +333,8 @@ class WavefrontPathIntegrator {
     float *nrcSuffixBeta = nullptr;        // NSpectrumSamples floats/slot: local suffix throughput, reset to 1 at the render-query vertex
     float *nrcSuffixSpreadAccum = nullptr; // suffix's own independent Eq. 3 accumulator
     float *nrcSuffixA0 = nullptr;          // suffix's own independent Eq. 4 baseline, from the real vertex before the render-query vertex to it
+    Point3f *nrcSuffixPrevP = nullptr;     // suffix's own "previous vertex" position, seeded from nrcPathPrevP at the render-query vertex, then evolved independently
+    float *nrcSuffixPrevPdf = nullptr;     // suffix's own "previous vertex" pdf, seeded from nrcPathPrevPdf at the render-query vertex, then evolved independently
     float *nrcSuffixInputs = nullptr;      // kNRCMaxSuffixLen*kNRCInputDims floats/slot: per-suffix-vertex input feature rows (incl. the bootstrap-only row)
     float *nrcSuffixLocal = nullptr;       // kNRCMaxSuffixLen*NSpectrumSamples floats/slot: per-suffix-vertex local (beta=1-frame) emission contribution
     float *nrcSuffixStep = nullptr;        // kNRCMaxSuffixLen*NSpectrumSamples floats/slot: per-suffix-vertex step factor (f*cos/pdf) to the next vertex
