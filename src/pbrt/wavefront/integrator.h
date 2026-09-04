@@ -307,11 +307,16 @@ class WavefrontPathIntegrator {
     // (invalid BSDF sample / Russian roulette), no bootstrap is needed. From
     // there, NRCTrainingSuffixFinish() walks the suffix backward, turning
     // that single prediction (or zero, for a natural end) into one training
-    // record per suffix vertex. To avoid ever dividing by a possibly-tiny
-    // throughput (the bug that caused the earlier over-bright render), the
-    // suffix tracks its OWN local throughput (nrcSuffixBeta), reset to 1.0 at
-    // the render-query vertex and updated purely by forward multiplication --
-    // never by dividing the real path's beta.
+    // record per suffix vertex: Ls = local[s] + step[s]*L_{s+1}, where
+    // step[s] is the single-vertex f*cos/pdf factor (times the Russian
+    // roulette survival correction) recorded at vertex s, and local[s] is
+    // the UNSCALED (no beta, no accumulated throughput of any kind) direct
+    // emission term observed when tracing from vertex s. This recursion
+    // alone is responsible for all throughput compounding along the suffix;
+    // nothing here is ever divided by a possibly-tiny throughput (the bug
+    // that caused the earlier over-bright render), and nothing is multiplied
+    // by an already-accumulated one either (which would double-count the
+    // compounding the recursion already performs).
     //
     // Known, deliberate scope limitations:
     //  - NEE/shadow rays are NOT tracked for suffix vertices (would require
@@ -330,7 +335,7 @@ class WavefrontPathIntegrator {
     uint8_t *nrcSuffixActive = nullptr;   // 1 = training path is currently in its suffix; cleared once bootstrap-terminated
     uint8_t *nrcSuffixLen = nullptr;      // number of finalized suffix vertices (valid slots 0..nrcSuffixLen-1)
     uint8_t *nrcSuffixTerminatedByHeuristic = nullptr;  // 1 = suffix ended via its own heuristic/cap (needs a bootstrap query); 0 = natural end
-    float *nrcSuffixBeta = nullptr;        // NSpectrumSamples floats/slot: local suffix throughput, reset to 1 at the render-query vertex
+    float *nrcSuffixBeta = nullptr;        // NSpectrumSamples floats/slot: local suffix throughput, reset to 1 at the render-query vertex. Currently write-only/unread (the backward recursion's own step[] chaining handles all throughput compounding) -- kept as harmless bookkeeping, same as nrcSnapshotBeta/L.
     float *nrcSuffixSpreadAccum = nullptr; // suffix's own independent Eq. 3 accumulator
     float *nrcSuffixA0 = nullptr;          // suffix's own independent Eq. 4 baseline, from the real vertex before the render-query vertex to it
     Point3f *nrcSuffixPrevP = nullptr;     // suffix's own "previous vertex" position, seeded from nrcPathPrevP at the render-query vertex, then evolved independently

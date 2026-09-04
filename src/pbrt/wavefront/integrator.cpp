@@ -793,20 +793,25 @@ void WavefrontPathIntegrator::HandleEmissiveIntersection() {
 #ifdef PBRT_BUILD_NRC
             // Parallel, throughput-independent copy of the same
             // contribution for the training suffix (if this vertex is part
-            // of one): same MIS math, but scaled by the suffix's own local
-            // beta (reset to 1 at the render-query vertex) instead of the
-            // real w.beta, so it can never blow up from a tiny real
-            // throughput. Written into whichever slot this vertex
+            // of one). This must NOT be scaled by nrcSuffixBeta (the
+            // suffix's accumulated throughput since the render-query
+            // vertex): the backward recursion in NRCTrainingSuffixFinish()
+            // (Ls = local[s] + step[s]*Lnext) already applies exactly ONE
+            // step[] factor per vertex as it walks backward, so it alone
+            // is responsible for all throughput compounding. Pre-multiplying
+            // local[s] by the ALREADY-accumulated suffixBeta here would
+            // double-count that compounding (once here, again via the
+            // recursion's chained step[] multiplies), producing targets
+            // whose scale grows/shrinks uncontrollably with suffix length --
+            // exactly the kind of runaway magnitude that blows up training
+            // into NaN weights. Written into whichever slot this vertex
             // currently occupies (nrcSuffixLen hasn't advanced for this
             // vertex yet -- that happens in surfscatter.cpp, which runs
             // after this kernel for the same wavefront depth).
             if (nrcSuffixActive[w.pixelIndex]) {
-                SampledSpectrum suffixBeta;
-                for (int c = 0; c < NSpectrumSamples; ++c)
-                    suffixBeta[c] = nrcSuffixBeta[w.pixelIndex * NSpectrumSamples + c];
                 SampledSpectrum Llocal(0.f);
                 if (w.depth == 0 || w.specularBounce) {
-                    Llocal = suffixBeta * Le / w.r_u.Average();
+                    Llocal = Le / w.r_u.Average();
                 } else {
                     Vector3f wiLocal = -w.wo;
                     LightSampleContext ctxLocal = w.prevIntrCtx;
@@ -815,7 +820,7 @@ void WavefrontPathIntegrator::HandleEmissiveIntersection() {
                         lightChoicePDFLocal * w.areaLight.PDF_Li(ctxLocal, wiLocal, true);
                     SampledSpectrum r_uLocal = w.r_u;
                     SampledSpectrum r_lLocal = w.r_l * lightPDFLocal;
-                    Llocal = suffixBeta * Le / (r_uLocal + r_lLocal).Average();
+                    Llocal = Le / (r_uLocal + r_lLocal).Average();
                 }
                 uint32_t slot = nrcSuffixLen[w.pixelIndex];
                 for (int c = 0; c < NSpectrumSamples; ++c)
