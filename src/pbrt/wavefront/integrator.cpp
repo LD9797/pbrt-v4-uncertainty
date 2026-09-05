@@ -31,6 +31,7 @@
 #include <pbrt/wavefront/aggregate.h>
 
 #include <atomic>
+#include <cmath>
 #include <cstring>
 #include <iostream>
 #include <map>
@@ -1274,6 +1275,36 @@ void LogSuffixLocalStats(const char *label, const float *local,
     fprintf(stderr, "NRC %s:\nn=%zu max=%.9g p99=%.9g p99.9=%.9g\n\n", label, n,
             maxVal, p99, p999);
 }
+
+// Diagnostic: scan a flat float buffer for NaN/Inf and report counts plus
+// the min/max of the remaining finite values. Unlike LogNRCMagnitudeStats/
+// LogSuffixLocalStats (which only look at finite-assuming magnitudes), this
+// is meant to catch corruption itself -- e.g. a bad feature row or a
+// diverging training step -- rather than just "is it big".
+void LogFiniteStats(const char *name, const float *data, size_t count) {
+    size_t nanCount = 0, infCount = 0;
+    float minV = Infinity, maxV = -Infinity;
+
+    for (size_t i = 0; i < count; ++i) {
+        float v = data[i];
+
+        if (std::isnan(v)) {
+            ++nanCount;
+            continue;
+        }
+
+        if (std::isinf(v)) {
+            ++infCount;
+            continue;
+        }
+
+        minV = std::min(minV, v);
+        maxV = std::max(maxV, v);
+    }
+
+    fprintf(stderr, "NRC %s: count=%zu nan=%zu inf=%zu min=%.9g max=%.9g\n", name,
+            count, nanCount, infCount, minV, maxV);
+}
 }  // namespace
 
 void WavefrontPathIntegrator::NRCTrainAndInferStep() {
@@ -1315,6 +1346,11 @@ void WavefrontPathIntegrator::NRCTrainAndInferStep() {
         }
     }
 
+    if (nValid > 0) {
+        LogFiniteStats("TRAIN INPUT", nrcCompactInputs, size_t(nValid) * kNRCInputDims);
+        LogFiniteStats("TRAIN TARGET", nrcCompactTargets, size_t(nValid) * kNRCOutputDims);
+    }
+
     const int kNRCTrainSteps = Options->nrcTrainSteps;
     if (nValid > 0) {
         uint32_t trainBatch = nrc::NeuralRadianceCache::RoundUpBatch(nValid);
@@ -1326,9 +1362,18 @@ void WavefrontPathIntegrator::NRCTrainAndInferStep() {
         }
         for (int step = 0; step < kNRCTrainSteps; ++step) {
             nrcLastLoss = nrcCache->TrainN(nrcCompactInputs, nrcCompactTargets, trainBatch);
-           // fprintf(stderr, "NRC train step %d/%d  nValid=%u  loss=%.6f\n",
-            //        step + 1, kNRCTrainSteps, nValid, nrcLastLoss);
+            fprintf(stderr,
+                    "NRC TRAIN: sample=%d step=%d/%d nValid=%u trainBatch=%u loss=%.9g "
+                    "finite=%d\n",
+                    nrcSampleCounter, step + 1, kNRCTrainSteps, nValid, trainBatch,
+                    nrcLastLoss, std::isfinite(nrcLastLoss) ? 1 : 0);
         }
+
+        cudaDeviceSynchronize();
+        nrcCache->Inference(nrcSuffixBootstrapInputs, nrcInferenceOutputs);
+        cudaDeviceSynchronize();
+        LogFiniteStats("OUTPUT AFTER TRAIN", nrcInferenceOutputs,
+                       size_t(nrcBatchSize) * kNRCOutputDims);
     }
 
     ++nrcSampleCounter;
@@ -1379,6 +1424,8 @@ void WavefrontPathIntegrator::NRCTrainingSuffixFinish() {
     // already consumed its previous contents earlier this pass.
     nrcCache->Inference(nrcSuffixBootstrapInputs, nrcInferenceOutputs);
     cudaDeviceSynchronize();
+    LogFiniteStats("OUTPUT BEFORE TRAIN", nrcInferenceOutputs,
+                   size_t(nrcBatchSize) * kNRCOutputDims);
 
     // Walk each training suffix backward from its last finalized vertex to
     // the render-query vertex (slot 0), seeding the recursion with the
