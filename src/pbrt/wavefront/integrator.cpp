@@ -1349,6 +1349,24 @@ void WavefrontPathIntegrator::NRCTrainAndInferStep() {
     if (nValid > 0) {
         LogFiniteStats("TRAIN INPUT", nrcCompactInputs, size_t(nValid) * kNRCInputDims);
         LogFiniteStats("TRAIN TARGET", nrcCompactTargets, size_t(nValid) * kNRCOutputDims);
+
+        // One-time (first sample only) per-dimension breakdown to find
+        // which of the kNRCInputDims input features is out of the expected
+        // roughly [-1,1] range -- printing this every sample would be a
+        // wall of output, so it's gated to sample 0.
+        if (nrcSampleCounter == 0) {
+            for (uint32_t d = 0; d < kNRCInputDims; ++d) {
+                float minV = Infinity, maxV = -Infinity;
+                for (uint32_t i = 0; i < nValid; ++i) {
+                    float v = nrcCompactInputs[i * kNRCInputDims + d];
+                    if (std::isfinite(v)) {
+                        minV = std::min(minV, v);
+                        maxV = std::max(maxV, v);
+                    }
+                }
+                fprintf(stderr, "NRC INPUT DIM %u: min=%.9g max=%.9g\n", d, minV, maxV);
+            }
+        }
     }
 
     const int kNRCTrainSteps = Options->nrcTrainSteps;
@@ -1444,6 +1462,7 @@ void WavefrontPathIntegrator::NRCTrainingSuffixFinish() {
         const RGBColorSpace *colorSpace = RGBColorSpace::sRGB;
         const uint32_t cap = kNRCMaxSuffixLen;
         const uint32_t batch = nrcBatchSize;
+        const bool warmedUp = nrcWarmedUp;
         ParallelFor(
             "NRC suffix backward propagation", batch, PBRT_CPU_GPU_LAMBDA(int i) {
                 uint32_t m = suffixLen[i];
@@ -1451,7 +1470,17 @@ void WavefrontPathIntegrator::NRCTrainingSuffixFinish() {
                     return;
                 SampledWavelengths lambda = psState->lambda[i];
                 SampledSpectrum Lnext(0.f);
-                if (terminatedByHeuristic[i]) {
+                // Only let the network's own bootstrap prediction influence
+                // targets once it's actually warmed up -- otherwise an
+                // untrained (effectively random/huge) prediction gets
+                // baked into the target here, and the resulting huge
+                // target trains the network to predict something even
+                // larger next time, a runaway loop that can reach
+                // Inf/NaN within a handful of samples. Before warmup, a
+                // heuristic/cap-terminated suffix simply contributes zero
+                // continuation (equivalent to a natural end), same as if
+                // no bootstrap query had been made at all.
+                if (terminatedByHeuristic[i] && warmedUp) {
                     RGB rgb(std::max(0.f, bootstrapOutputs[i * (int)kNRCOutputDims + 0]),
                             std::max(0.f, bootstrapOutputs[i * (int)kNRCOutputDims + 1]),
                             std::max(0.f, bootstrapOutputs[i * (int)kNRCOutputDims + 2]));

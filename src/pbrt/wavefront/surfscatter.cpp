@@ -593,13 +593,20 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                 row[39] = (std::atan2(ns.y, ns.x) + Pi) * Inv2Pi;
                 // dim 40: roughness, transformed 1-exp(-r) per Muller et al. -> OneBlob(4)
                 row[40] = 1.f - std::exp(-bsdf.Roughness());
-                // dims 41-43: diffuse albedo (hemispherical reflectance -> sensor RGB), raw
+                // dims 41-43: diffuse albedo (hemispherical reflectance -> sensor RGB), raw.
+                // film.ToOutputRGB() runs a Monte Carlo spectral-to-RGB estimator meant
+                // for radiance (it divides by lambda.PDF(), see PixelSensor::ToSensorRGB/
+                // SampledSpectrum::ToXYZ), so single-sample noise can push it wildly
+                // outside [0,1] even though it's actually a reflectance here. Clamping
+                // to [0,1] is a stopgap until material features get a proper stable
+                // (non-stochastic) RGB reflectance conversion.
                 RGB albedoRGB = film.ToOutputRGB(albedo, lambda);
-                row[41] = float(albedoRGB.r);
-                row[42] = float(albedoRGB.g);
-                row[43] = float(albedoRGB.b);
+                row[41] = Clamp(float(albedoRGB.r), 0.f, 1.f);
+                row[42] = Clamp(float(albedoRGB.g), 0.f, 1.f);
+                row[43] = Clamp(float(albedoRGB.b), 0.f, 1.f);
                 // dims 44-46: specular reflectance F0 (Fresnel at normal incidence), raw.
                 // 0 for types with no specular-lobe concept (diffuse, hair, measured, etc.).
+                // Same clamping rationale as albedo above.
                 RGB f0RGB(0.f, 0.f, 0.f);
                 if constexpr (std::is_same_v<ConcreteBxDF, DielectricBxDF>) {
                     Float f0 = bxdf.F0();
@@ -607,9 +614,9 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                 } else if constexpr (std::is_same_v<ConcreteBxDF, ConductorBxDF>) {
                     f0RGB = film.ToOutputRGB(bxdf.F0(), lambda);
                 }
-                row[44] = f0RGB.r;
-                row[45] = f0RGB.g;
-                row[46] = f0RGB.b;
+                row[44] = Clamp(f0RGB.r, 0.f, 1.f);
+                row[45] = Clamp(f0RGB.g, 0.f, 1.f);
+                row[46] = Clamp(f0RGB.b, 0.f, 1.f);
                 // dims 47-48: padding, constant 1 (paper pads to 64 for tile alignment)
                 row[47] = 1.f;
                 row[48] = 1.f;
