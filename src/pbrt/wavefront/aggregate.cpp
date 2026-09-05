@@ -85,7 +85,7 @@ void CPUAggregate::IntersectShadowTr(int maxRays, ShadowRayQueue *shadowRayQueue
                     return TransmittanceTraceResult{true, si->intr.p(),
                                                     si->intr.material};
             },
-            [&](Point3f p) -> Ray { return si->intr.SpawnRayTo(p); });
+            [&](Point3f p) -> Ray { return si->intr.SpawnRayTo(p); }, nrcSuffixLocal);
     });
 }
 

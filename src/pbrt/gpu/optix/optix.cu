@@ -288,7 +288,8 @@ extern "C" __global__ void __raygen__shadow_Tr() {
                        },
                        [&](Point3f p) -> Ray {
                            return ctx.SpawnRayTo(p);
-                       });
+                       },
+                       params.nrcSuffixLocal);
 }
 
 extern "C" __global__ void __miss__shadow_Tr() {

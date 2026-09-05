@@ -899,12 +899,20 @@ void WavefrontPathIntegrator::TraceShadowRays(int wavefrontDepth) {
 #ifdef PBRT_BUILD_NRC
     float *suffixLocal = nrcSuffixLocal;
     bool logNEEStats = nrcCache && (nrcSampleCounter & 31) == 0;
+    int nRays = 0;
     if (logNEEStats) {
         cudaDeviceSynchronize();
         // "Generated": every suffix-tracked NEE shadow ray pushed this
         // depth (nrcSuffixLd != 0), regardless of whether it turns out to
-        // be occluded.
-        int nRays = shadowRayQueue->Size();
+        // be occluded. Snapshot nrcSuffixLocal at each ray's own
+        // (pixelIndex, nrcSuffixSlot) -- captured at push time in
+        // surfscatter.cpp -- rather than the *current* nrcSuffixLen: that
+        // can have already advanced past this ray's slot by the time we
+        // get here (surfscatter.cpp runs for the whole wavefront depth
+        // before TraceShadowRays does), which would make the snapshot/diff
+        // below look at the wrong slot and undercount "visible".
+        nRays = shadowRayQueue->Size();
+        nrcSuffixLocalSnapshotScratch.resize(size_t(nRays) * NSpectrumSamples);
         for (int i = 0; i < nRays; ++i) {
             ShadowRayWorkItem w = (*shadowRayQueue)[i];
             SampledSpectrum ld = w.nrcSuffixLd;
@@ -915,20 +923,10 @@ void WavefrontPathIntegrator::TraceShadowRays(int wavefrontDepth) {
                 mag = std::max(mag, float(ld[c]));
             ++nrcSuffixNEEGenCount;
             nrcSuffixNEEGenMax = std::max(nrcSuffixNEEGenMax, mag);
-        }
-        // Snapshot each active pixel's current suffix slot so we can
-        // isolate this depth's NEE-visible delta after tracing (the same
-        // slot may also have received an emissive-hit contribution from
-        // HandleEmissiveIntersection() earlier this depth, written via
-        // '='; we only want what RecordShadowRayResult adds via '+=' on
-        // top of that).
-        nrcSuffixLocalSnapshotScratch.resize(size_t(nrcBatchSize) * NSpectrumSamples);
-        for (uint32_t i = 0; i < nrcBatchSize; ++i) {
-            if (!nrcSuffixActive[i])
-                continue;
-            uint32_t slot = nrcSuffixLen[i];
+
             const float *src = nrcSuffixLocal +
-                               (size_t(i) * kNRCMaxSuffixLen + slot) * NSpectrumSamples;
+                               (size_t(w.pixelIndex) * kNRCMaxSuffixLen + w.nrcSuffixSlot) *
+                                   NSpectrumSamples;
             float *dst = nrcSuffixLocalSnapshotScratch.data() + size_t(i) * NSpectrumSamples;
             for (int c = 0; c < NSpectrumSamples; ++c)
                 dst[c] = src[c];
@@ -946,14 +944,18 @@ void WavefrontPathIntegrator::TraceShadowRays(int wavefrontDepth) {
 #ifdef PBRT_BUILD_NRC
     if (logNEEStats) {
         cudaDeviceSynchronize();
-        // "Visible": the subset of the above that turned out unoccluded,
-        // i.e. actually made it into nrcSuffixLocal this depth.
-        for (uint32_t i = 0; i < nrcBatchSize; ++i) {
-            if (!nrcSuffixActive[i])
+        // "Visible": re-read the same shadow ray queue entries (unchanged
+        // until the Reset() below) and diff against the snapshot taken
+        // above, at that same ray's exact (pixelIndex, nrcSuffixSlot) --
+        // not whatever slot happens to be current now.
+        for (int i = 0; i < nRays; ++i) {
+            ShadowRayWorkItem w = (*shadowRayQueue)[i];
+            SampledSpectrum ld = w.nrcSuffixLd;
+            if (!ld)
                 continue;
-            uint32_t slot = nrcSuffixLen[i];
             const float *cur = nrcSuffixLocal +
-                               (size_t(i) * kNRCMaxSuffixLen + slot) * NSpectrumSamples;
+                               (size_t(w.pixelIndex) * kNRCMaxSuffixLen + w.nrcSuffixSlot) *
+                                   NSpectrumSamples;
             const float *before =
                 nrcSuffixLocalSnapshotScratch.data() + size_t(i) * NSpectrumSamples;
             float mag = 0.f;
