@@ -673,8 +673,25 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                     ray.medium = Dot(ray.d, w.n) > 0 ? w.mediumInterface.outside
                                                      : w.mediumInterface.inside;
 
+                // Training-suffix NEE: the same beta=1 equivalent of Ld
+                // (i.e. Ld with w.beta replaced by 1) that
+                // RecordShadowRayResult (intersect.h) will add into this
+                // vertex's own nrcSuffixLocal slot if the shadow ray turns
+                // out to be unoccluded. Left at zero (a harmless no-op) for
+                // paths that aren't tracking an active, non-bootstrap
+                // training suffix at this vertex.
+                SampledSpectrum nrcSuffixLd(0.f);
+                int nrcSuffixSlotForShadowRay = 0;
+#ifdef PBRT_BUILD_NRC
+                if (nrcSuffixTrackThisVertex && !nrcSuffixIsBootstrapVertex) {
+                    nrcSuffixLd = f * AbsDot(wi, ns) * ls->L;
+                    nrcSuffixSlotForShadowRay = int(nrcSuffixSlot);
+                }
+#endif
+
                 shadowRayQueue->Push(ShadowRayWorkItem{ray, 1 - ShadowEpsilon, lambda, Ld,
-                                                       r_u, r_l, w.pixelIndex});
+                                                       r_u, r_l, w.pixelIndex, nrcSuffixLd,
+                                                       nrcSuffixSlotForShadowRay});
 
                 PBRT_DBG("w.index %d spawned shadow ray depth %d Ld %f %f %f %f "
                          "new beta %f %f %f %f beta/uni %f %f %f %f Ld/uni %f %f %f %f\n",

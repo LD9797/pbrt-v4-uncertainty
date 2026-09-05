@@ -54,9 +54,11 @@ class WavefrontAggregate {
                                   RayQueue *nextRayQ) const = 0;
 
     virtual void IntersectShadow(int maxRays, ShadowRayQueue *shadowRayQueue,
-                                 SOA<PixelSampleState> *pixelSampleState) const = 0;
+                                 SOA<PixelSampleState> *pixelSampleState,
+                                 float *nrcSuffixLocal) const = 0;
     virtual void IntersectShadowTr(int maxRays, ShadowRayQueue *shadowRayQueue,
-                                   SOA<PixelSampleState> *pixelSampleState) const = 0;
+                                   SOA<PixelSampleState> *pixelSampleState,
+                                   float *nrcSuffixLocal) const = 0;
 
     virtual void IntersectOneRandom(
         int maxRays, SubsurfaceScatterQueue *subsurfaceScatterQueue) const = 0;
@@ -331,7 +333,9 @@ class WavefrontPathIntegrator {
     //    (invalid BSDF sample / RR-kill) get no suffix and no training
     //    record this pass (a single-vertex record there is always zero, so
     //    dropping it loses nothing).
-    static constexpr uint32_t kNRCMaxSuffixLen = 4;
+    // kNRCMaxSuffixLen lives at namespace scope in workitems.h (needed by
+    // intersect.h's free-function RecordShadowRayResult too); still visible
+    // here unqualified via ordinary namespace lookup.
     uint8_t *nrcSuffixActive = nullptr;   // 1 = training path is currently in its suffix; cleared once bootstrap-terminated
     uint8_t *nrcSuffixLen = nullptr;      // number of finalized suffix vertices (valid slots 0..nrcSuffixLen-1)
     uint8_t *nrcSuffixTerminatedByHeuristic = nullptr;  // 1 = suffix ended via its own heuristic/cap (needs a bootstrap query); 0 = natural end

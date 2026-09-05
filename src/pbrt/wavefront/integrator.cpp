@@ -746,8 +746,47 @@ void WavefrontPathIntegrator::HandleEscapedRays() {
                             w.r_l * lightChoicePDF * light.PDF_Li(ctx, w.rayd, true);
                         L += w.beta * Le / (w.r_u + r_l).Average();
                     }
+
+#ifdef PBRT_BUILD_NRC
+                    // Parallel, throughput-independent copy for the training
+                    // suffix -- see the matching block in
+                    // HandleEmissiveIntersection() for the full rationale
+                    // (must NOT be scaled by any accumulated throughput; the
+                    // backward recursion in NRCTrainingSuffixFinish() owns
+                    // all of that).
+                    if (nrcSuffixActive[w.pixelIndex]) {
+                        SampledSpectrum Llocal(0.f);
+                        if (w.depth == 0 || w.specularBounce) {
+                            Llocal = Le / w.r_u.Average();
+                        } else {
+                            LightSampleContext ctxLocal = w.prevIntrCtx;
+                            Float lightChoicePDFLocal = lightSampler.PMF(ctxLocal, light);
+                            SampledSpectrum r_lLocal =
+                                w.r_l * lightChoicePDFLocal * light.PDF_Li(ctxLocal, w.rayd, true);
+                            Llocal = Le / (w.r_u + r_lLocal).Average();
+                        }
+                        uint32_t slot = nrcSuffixLen[w.pixelIndex];
+                        for (int c = 0; c < NSpectrumSamples; ++c)
+                            nrcSuffixLocal[(size_t(w.pixelIndex) * kNRCMaxSuffixLen + slot) *
+                                               NSpectrumSamples +
+                                           c] += Llocal[c];
+                    }
+#endif
                 }
             }
+
+#ifdef PBRT_BUILD_NRC
+            // The path ends here (ray escaped the scene, no further
+            // vertices possible): finalize the suffix the same way the
+            // invalid-BSDF-sample/Russian-roulette natural ends do in
+            // surfscatter.cpp. nrcSuffixLen already correctly counts this
+            // vertex (set by the previous vertex's surfscatter.cpp call
+            // before this ray was even traced); only nrcSuffixActive needs
+            // clearing here, purely for state hygiene (nothing reads it
+            // again for this pixel this pass regardless).
+            if (nrcSuffixActive[w.pixelIndex])
+                nrcSuffixActive[w.pixelIndex] = 0;
+#endif
 
             // Update pixel radiance if ray's radiance is nonzero
             if (L) {
@@ -837,10 +876,17 @@ void WavefrontPathIntegrator::HandleEmissiveIntersection() {
 }
 
 void WavefrontPathIntegrator::TraceShadowRays(int wavefrontDepth) {
+#ifdef PBRT_BUILD_NRC
+    float *suffixLocal = nrcSuffixLocal;
+#else
+    float *suffixLocal = nullptr;
+#endif
     if (haveMedia)
-        aggregate->IntersectShadowTr(maxQueueSize, shadowRayQueue, &pixelSampleState);
+        aggregate->IntersectShadowTr(maxQueueSize, shadowRayQueue, &pixelSampleState,
+                                     suffixLocal);
     else
-        aggregate->IntersectShadow(maxQueueSize, shadowRayQueue, &pixelSampleState);
+        aggregate->IntersectShadow(maxQueueSize, shadowRayQueue, &pixelSampleState,
+                                   suffixLocal);
     // Reset shadow ray queue
     Do(
         "Reset shadowRayQueue", PBRT_CPU_GPU_LAMBDA() {

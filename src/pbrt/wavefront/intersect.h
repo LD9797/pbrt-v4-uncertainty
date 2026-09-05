@@ -30,7 +30,8 @@ inline PBRT_CPU_GPU void EnqueueWorkAfterMiss(RayWorkItem r,
 
 inline PBRT_CPU_GPU void RecordShadowRayResult(const ShadowRayWorkItem w,
                                                SOA<PixelSampleState> *pixelSampleState,
-                                               bool foundIntersection) {
+                                               bool foundIntersection,
+                                               float *nrcSuffixLocal = nullptr) {
     if (foundIntersection) {
         PBRT_DBG("Shadow ray was occluded\n");
         return;
@@ -43,6 +44,20 @@ inline PBRT_CPU_GPU void RecordShadowRayResult(const ShadowRayWorkItem w,
 
     SampledSpectrum Lpixel = pixelSampleState->L[w.pixelIndex];
     pixelSampleState->L[w.pixelIndex] = Lpixel + Ld;
+
+    // Training-suffix NEE: add this vertex's own (beta=1) direct-lighting
+    // contribution into its slot, the same way HandleEmissiveIntersection
+    // does for the BSDF-sampled-hit-a-light case. Both are complementary
+    // MIS estimates of the same vertex's direct-lighting term, so they add;
+    // nrcSuffixLd is exactly zero (a harmless no-op) for shadow rays that
+    // aren't part of an active, non-bootstrap training suffix.
+    if (nrcSuffixLocal != nullptr && w.nrcSuffixLd) {
+        SampledSpectrum suffixLd = w.nrcSuffixLd / (w.r_u + w.r_l).Average();
+        size_t base = (size_t(w.pixelIndex) * kNRCMaxSuffixLen + w.nrcSuffixSlot) *
+                      NSpectrumSamples;
+        for (int c = 0; c < NSpectrumSamples; ++c)
+            nrcSuffixLocal[base + c] += suffixLd[c];
+    }
 }
 
 inline PBRT_CPU_GPU void EnqueueWorkAfterIntersection(
