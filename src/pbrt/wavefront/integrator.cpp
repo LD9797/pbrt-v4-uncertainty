@@ -403,6 +403,16 @@ WavefrontPathIntegrator::WavefrontPathIntegrator(
 #endif  // PBRT_BUILD_NRC
 }
 
+#ifdef PBRT_BUILD_NRC
+namespace {
+// Forward declaration: defined below, alongside LogNRCMagnitudeStats, but
+// needed here since Render() (which calls it) appears earlier in the file.
+void LogSuffixLocalStats(const char *label, const float *local,
+                         const uint8_t *suffixLen, uint32_t batch, uint32_t cap,
+                         int nChannels);
+}  // namespace
+#endif  // PBRT_BUILD_NRC
+
 // WavefrontPathIntegrator Method Definitions
 Float WavefrontPathIntegrator::Render() {
     Bounds2i pixelBounds = film.PixelBounds();
@@ -591,6 +601,12 @@ Float WavefrontPathIntegrator::Render() {
                 // Bootstrap-query and backward-propagate this pass's
                 // training suffixes into per-vertex records before
                 // compacting/training on them.
+                if (nrcCache && (nrcSampleCounter & 31) == 0) {
+                    cudaDeviceSynchronize();
+                    LogSuffixLocalStats("nrcSuffixLocal", nrcSuffixLocal, nrcSuffixLen,
+                                       nrcBatchSize, kNRCMaxSuffixLen,
+                                       (int)NSpectrumSamples);
+                }
                 NRCTrainingSuffixFinish();
                 // Current scanline pass has finished gathering valid training samples.
                 NRCTrainAndInferStep();
@@ -1140,6 +1156,38 @@ void LogNRCMagnitudeStats(const char *label, const float *base, size_t count,
             continue;
         const float *rgb = base + i * 3;
         mags.push_back(std::max({rgb[0], rgb[1], rgb[2]}));
+    }
+    if (mags.empty()) {
+        fprintf(stderr, "NRC %s stats: n=0\n", label);
+        return;
+    }
+    std::sort(mags.begin(), mags.end());
+    size_t n = mags.size();
+    float maxVal = mags.back();
+    float p99 = mags[std::min(n - 1, size_t(0.99 * n))];
+    float p999 = mags[std::min(n - 1, size_t(0.999 * n))];
+    fprintf(stderr, "\nNRC %s stats: n=%zu max=%.3f p99=%.3f p99.9=%.3f\n", label, n,
+            maxVal, p99, p999);
+}
+
+// Diagnostic: like LogNRCMagnitudeStats, but for the ragged
+// per-pixel-suffix nrcSuffixLocal buffer, which is laid out as
+// batch*cap slots of nChannels floats each, but only the first
+// suffixLen[i] slots for pixel i are meaningful (the rest are zero
+// padding that would otherwise skew the percentiles).
+void LogSuffixLocalStats(const char *label, const float *local,
+                         const uint8_t *suffixLen, uint32_t batch, uint32_t cap,
+                         int nChannels) {
+    std::vector<float> mags;
+    for (uint32_t i = 0; i < batch; ++i) {
+        uint32_t m = suffixLen[i];
+        for (uint32_t s = 0; s < m; ++s) {
+            const float *v = local + (size_t(i) * cap + s) * nChannels;
+            float mag = 0.f;
+            for (int c = 0; c < nChannels; ++c)
+                mag = std::max(mag, v[c]);
+            mags.push_back(mag);
+        }
     }
     if (mags.empty()) {
         fprintf(stderr, "NRC %s stats: n=0\n", label);
