@@ -25,6 +25,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace pbrt {
 
@@ -350,6 +351,17 @@ class WavefrontPathIntegrator {
     float *nrcSuffixTarget = nullptr;      // kNRCMaxSuffixLen*kNRCOutputDims floats/slot: backward-propagated RGB target, filled by NRCTrainingSuffixFinish()
     float *nrcSuffixBootstrapInputs = nullptr;  // nrcBatchSize*kNRCInputDims scratch: bootstrap rows gathered contiguously for one Inference() call
     uint32_t nrcCompactCapacity = 0;       // capacity of nrcCompactInputs/nrcCompactTargets in rows (> nrcBatchSize to allow room for suffix records)
+
+    // Host-only running diagnostics for this pass, accumulated across each
+    // wavefrontDepth's TraceShadowRays() call and reset in
+    // NRCResetSampleBuffers(); printed just before NRCTrainingSuffixFinish().
+    // "Generated" counts every suffix-tracked NEE shadow ray pushed
+    // (regardless of visibility); "visible" counts only those whose shadow
+    // ray turned out unoccluded (i.e. that actually contributed to
+    // nrcSuffixLocal).
+    uint64_t nrcSuffixNEEGenCount = 0, nrcSuffixNEEVisCount = 0;
+    float nrcSuffixNEEGenMax = 0.f, nrcSuffixNEEVisMax = 0.f;
+    std::vector<float> nrcSuffixLocalSnapshotScratch;  // reused scratch, nrcBatchSize*NSpectrumSamples floats
 
     void NRCResetSampleBuffers();
     void NRCCaptureFinalRadiance();

@@ -602,6 +602,10 @@ Float WavefrontPathIntegrator::Render() {
                 // training suffixes into per-vertex records before
                 // compacting/training on them.
                 if (nrcCache && (nrcSampleCounter & 31) == 0) {
+                    fprintf(stderr, "NRC suffix NEE generated:\ncount=%llu max=%.9g\n\n",
+                            (unsigned long long)nrcSuffixNEEGenCount, nrcSuffixNEEGenMax);
+                    fprintf(stderr, "NRC suffix NEE visible:\ncount=%llu max=%.9g\n\n",
+                            (unsigned long long)nrcSuffixNEEVisCount, nrcSuffixNEEVisMax);
                     cudaDeviceSynchronize();
                     LogSuffixLocalStats("nrcSuffixLocal", nrcSuffixLocal, nrcSuffixLen,
                                        nrcBatchSize, kNRCMaxSuffixLen,
@@ -894,6 +898,42 @@ void WavefrontPathIntegrator::HandleEmissiveIntersection() {
 void WavefrontPathIntegrator::TraceShadowRays(int wavefrontDepth) {
 #ifdef PBRT_BUILD_NRC
     float *suffixLocal = nrcSuffixLocal;
+    bool logNEEStats = nrcCache && (nrcSampleCounter & 31) == 0;
+    if (logNEEStats) {
+        cudaDeviceSynchronize();
+        // "Generated": every suffix-tracked NEE shadow ray pushed this
+        // depth (nrcSuffixLd != 0), regardless of whether it turns out to
+        // be occluded.
+        int nRays = shadowRayQueue->Size();
+        for (int i = 0; i < nRays; ++i) {
+            ShadowRayWorkItem w = (*shadowRayQueue)[i];
+            SampledSpectrum ld = w.nrcSuffixLd;
+            if (!ld)
+                continue;
+            float mag = 0.f;
+            for (int c = 0; c < NSpectrumSamples; ++c)
+                mag = std::max(mag, float(ld[c]));
+            ++nrcSuffixNEEGenCount;
+            nrcSuffixNEEGenMax = std::max(nrcSuffixNEEGenMax, mag);
+        }
+        // Snapshot each active pixel's current suffix slot so we can
+        // isolate this depth's NEE-visible delta after tracing (the same
+        // slot may also have received an emissive-hit contribution from
+        // HandleEmissiveIntersection() earlier this depth, written via
+        // '='; we only want what RecordShadowRayResult adds via '+=' on
+        // top of that).
+        nrcSuffixLocalSnapshotScratch.resize(size_t(nrcBatchSize) * NSpectrumSamples);
+        for (uint32_t i = 0; i < nrcBatchSize; ++i) {
+            if (!nrcSuffixActive[i])
+                continue;
+            uint32_t slot = nrcSuffixLen[i];
+            const float *src = nrcSuffixLocal +
+                               (size_t(i) * kNRCMaxSuffixLen + slot) * NSpectrumSamples;
+            float *dst = nrcSuffixLocalSnapshotScratch.data() + size_t(i) * NSpectrumSamples;
+            for (int c = 0; c < NSpectrumSamples; ++c)
+                dst[c] = src[c];
+        }
+    }
 #else
     float *suffixLocal = nullptr;
 #endif
@@ -903,6 +943,32 @@ void WavefrontPathIntegrator::TraceShadowRays(int wavefrontDepth) {
     else
         aggregate->IntersectShadow(maxQueueSize, shadowRayQueue, &pixelSampleState,
                                    suffixLocal);
+#ifdef PBRT_BUILD_NRC
+    if (logNEEStats) {
+        cudaDeviceSynchronize();
+        // "Visible": the subset of the above that turned out unoccluded,
+        // i.e. actually made it into nrcSuffixLocal this depth.
+        for (uint32_t i = 0; i < nrcBatchSize; ++i) {
+            if (!nrcSuffixActive[i])
+                continue;
+            uint32_t slot = nrcSuffixLen[i];
+            const float *cur = nrcSuffixLocal +
+                               (size_t(i) * kNRCMaxSuffixLen + slot) * NSpectrumSamples;
+            const float *before =
+                nrcSuffixLocalSnapshotScratch.data() + size_t(i) * NSpectrumSamples;
+            float mag = 0.f;
+            for (int c = 0; c < NSpectrumSamples; ++c) {
+                float delta = cur[c] - before[c];
+                if (delta > mag)
+                    mag = delta;
+            }
+            if (mag > 0.f) {
+                ++nrcSuffixNEEVisCount;
+                nrcSuffixNEEVisMax = std::max(nrcSuffixNEEVisMax, mag);
+            }
+        }
+    }
+#endif
     // Reset shadow ray queue
     Do(
         "Reset shadowRayQueue", PBRT_CPU_GPU_LAMBDA() {
@@ -1108,6 +1174,11 @@ void WavefrontPathIntegrator::NRCResetSampleBuffers() {
     // buffers for this scanline pass.
     if (!nrcCache)
         return;
+
+    // Host-only running diagnostics (see integrator.h) for this pass.
+    nrcSuffixNEEGenCount = nrcSuffixNEEVisCount = 0;
+    nrcSuffixNEEGenMax = nrcSuffixNEEVisMax = 0.f;
+
     float *inputs = nrcInputs;
     float *targets = nrcTargets;
     uint8_t *valid = nrcValid;
@@ -1158,7 +1229,7 @@ void LogNRCMagnitudeStats(const char *label, const float *base, size_t count,
         mags.push_back(std::max({rgb[0], rgb[1], rgb[2]}));
     }
     if (mags.empty()) {
-        fprintf(stderr, "NRC %s stats: n=0\n", label);
+        fprintf(stderr, "NRC %s:\nn=0\n\n", label);
         return;
     }
     std::sort(mags.begin(), mags.end());
@@ -1166,7 +1237,7 @@ void LogNRCMagnitudeStats(const char *label, const float *base, size_t count,
     float maxVal = mags.back();
     float p99 = mags[std::min(n - 1, size_t(0.99 * n))];
     float p999 = mags[std::min(n - 1, size_t(0.999 * n))];
-    fprintf(stderr, "\nNRC %s stats: n=%zu max=%.3f p99=%.3f p99.9=%.3f\n", label, n,
+    fprintf(stderr, "NRC %s:\nn=%zu max=%.9g p99=%.9g p99.9=%.9g\n\n", label, n,
             maxVal, p99, p999);
 }
 
@@ -1190,7 +1261,7 @@ void LogSuffixLocalStats(const char *label, const float *local,
         }
     }
     if (mags.empty()) {
-        fprintf(stderr, "NRC %s stats: n=0\n", label);
+        fprintf(stderr, "NRC %s:\nn=0\n\n", label);
         return;
     }
     std::sort(mags.begin(), mags.end());
@@ -1198,7 +1269,7 @@ void LogSuffixLocalStats(const char *label, const float *local,
     float maxVal = mags.back();
     float p99 = mags[std::min(n - 1, size_t(0.99 * n))];
     float p999 = mags[std::min(n - 1, size_t(0.999 * n))];
-    fprintf(stderr, "\nNRC %s stats: n=%zu max=%.3f p99=%.3f p99.9=%.3f\n", label, n,
+    fprintf(stderr, "NRC %s:\nn=%zu max=%.9g p99=%.9g p99.9=%.9g\n\n", label, n,
             maxVal, p99, p999);
 }
 }  // namespace
