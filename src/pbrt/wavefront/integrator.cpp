@@ -614,6 +614,14 @@ Float WavefrontPathIntegrator::Render() {
                     LogSuffixLocalStats("nrcSuffixLocal", nrcSuffixLocal, nrcSuffixLen,
                                        nrcBatchSize, kNRCMaxSuffixLen,
                                        (int)NSpectrumSamples);
+                }
+                // Temporary: narrow window around where warmup ends (sample
+                // 16 by default) to catch the exact pass where an
+                // untrained bootstrap prediction first starts blowing up
+                // suffix targets -- the usual 1-in-32 gate above would
+                // skip right over it.
+                if (nrcCache && nrcSampleCounter >= 14 && nrcSampleCounter <= 22) {
+                    cudaDeviceSynchronize();
                     LogSuffixStepStats("nrcSuffixStep", nrcSuffixStep, nrcSuffixLen,
                                       nrcBatchSize, kNRCMaxSuffixLen,
                                       (int)NSpectrumSamples);
