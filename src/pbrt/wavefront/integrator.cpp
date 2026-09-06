@@ -357,10 +357,10 @@ WavefrontPathIntegrator::WavefrontPathIntegrator(
                    sizeof(float) * NSpectrumSamples * nrcBatchSize);
 
         // Training-suffix buffers (see integrator.h for the full design
-        // rationale). nrcSuffixInputs/Local/Step are sized per-pixel *
-        // kNRCMaxSuffixLen; nrcSuffixTarget is the same shape but in RGB
-        // (kNRCOutputDims) rather than spectral (NSpectrumSamples) since it
-        // is the final, already-converted per-record training target.
+        // rationale). nrcSuffixInputs/Local/Step/Target are all sized
+        // per-pixel * kNRCMaxSuffixLen; nrcSuffixTarget is kNRCOutputDims
+        // (== NSpectrumSamples) floats per record -- raw spectral radiance,
+        // matching what the network is trained to output.
         cudaMallocManaged(&nrcSuffixActive, sizeof(uint8_t) * nrcBatchSize);
         cudaMallocManaged(&nrcSuffixLen, sizeof(uint8_t) * nrcBatchSize);
         cudaMallocManaged(&nrcSuffixTerminatedByHeuristic,
@@ -734,9 +734,17 @@ Float WavefrontPathIntegrator::Render() {
                 int x = p.x - pMin.x, y = p.y - pMin.y;
                 if (x < 0 || y < 0 || x >= res.x || y >= res.y) return;
                 int pix = y * res.x + x;
-                predImg[pix * 3 + 0] = std::max(0.f, outputs[i * (int)kNRCOutputDims + 0]);
-                predImg[pix * 3 + 1] = std::max(0.f, outputs[i * (int)kNRCOutputDims + 1]);
-                predImg[pix * 3 + 2] = std::max(0.f, outputs[i * (int)kNRCOutputDims + 2]);
+                // Visualization only: the one legitimate place a spectral
+                // NRC prediction gets converted to RGB, exactly like PBRT's
+                // film normally converts a final spectral path contribution
+                // to a pixel.
+                SampledSpectrum predicted;
+                for (int c = 0; c < NSpectrumSamples; ++c)
+                    predicted[c] = std::max(0.f, outputs[i * (int)kNRCOutputDims + c]);
+                RGB rgb = film.ToOutputRGB(predicted, psState->lambda[i]);
+                predImg[pix * 3 + 0] = rgb.r;
+                predImg[pix * 3 + 1] = rgb.g;
+                predImg[pix * 3 + 2] = rgb.b;
             });
             cudaDeviceSynchronize();
         }
@@ -1237,19 +1245,22 @@ void WavefrontPathIntegrator::NRCResetSampleBuffers() {
 }
 
 namespace {
-// Diagnostic: log max/p99/p99.9 of per-sample RGB magnitude (max channel)
-// for a batch of 3-float-per-slot values, restricted to entries where
+// Diagnostic: log max/p99/p99.9 of per-sample magnitude (max channel) for a
+// batch of nChannels-float-per-slot values, restricted to entries where
 // "active" is null or true. Used to check whether the continuation-only,
 // throughput-normalized NRC targets (or its predictions) are blowing up.
 void LogNRCMagnitudeStats(const char *label, const float *base, size_t count,
-                           const uint8_t *active = nullptr) {
+                           int nChannels, const uint8_t *active = nullptr) {
     std::vector<float> mags;
     mags.reserve(count);
     for (size_t i = 0; i < count; ++i) {
         if (active && !active[i])
             continue;
-        const float *rgb = base + i * 3;
-        mags.push_back(std::max({rgb[0], rgb[1], rgb[2]}));
+        const float *v = base + i * nChannels;
+        float mag = 0.f;
+        for (int c = 0; c < nChannels; ++c)
+            mag = std::max(mag, v[c]);
+        mags.push_back(mag);
     }
     if (mags.empty()) {
         fprintf(stderr, "NRC %s:\nn=0\n\n", label);
@@ -1475,7 +1486,7 @@ void WavefrontPathIntegrator::NRCTrainAndInferStep() {
     if ((nrcSampleCounter & 31) == 0) {
         LOG_VERBOSE("NRC: step %d loss %f", nrcSampleCounter, nrcLastLoss);
         if (nValid > 0)
-            LogNRCMagnitudeStats("target", nrcCompactTargets, nValid);
+            LogNRCMagnitudeStats("target", nrcCompactTargets, nValid, (int)kNRCOutputDims);
     }
 }
 
@@ -1521,45 +1532,18 @@ void WavefrontPathIntegrator::NRCTrainingSuffixFinish() {
     LogFiniteStats("OUTPUT BEFORE TRAIN", nrcInferenceOutputs,
                    size_t(nrcBatchSize) * kNRCOutputDims);
 
-    // Temporary: focused round-trip diagnostic for the RGB -> spectrum ->
-    // RGB conversion applied to the network's own bootstrap prediction,
-    // isolated from any suffix step-product amplification. Narrow window
-    // around where warmup ends (sample 16 by default), where the target
-    // explosion is observed to begin.
-    if (nrcSampleCounter >= 14 && nrcSampleCounter <= 18) {
-        float predMax = 0.f, specMax = 0.f, roundTripMax = 0.f;
-        const uint8_t *terminatedByHeuristic = nrcSuffixTerminatedByHeuristic;
-        const float *bootstrapOutputs = nrcInferenceOutputs;
-        const RGBColorSpace *colorSpace = RGBColorSpace::sRGB;
-        auto *psState = &pixelSampleState;
-        for (uint32_t i = 0; i < nrcBatchSize; ++i) {
-            if (!terminatedByHeuristic[i])
-                continue;
-            RGB pred(std::max(0.f, bootstrapOutputs[i * (int)kNRCOutputDims + 0]),
-                     std::max(0.f, bootstrapOutputs[i * (int)kNRCOutputDims + 1]),
-                     std::max(0.f, bootstrapOutputs[i * (int)kNRCOutputDims + 2]));
-            SampledWavelengths lambda = psState->lambda[i];
-            SampledSpectrum spec = RGBUnboundedSpectrum(*colorSpace, pred).Sample(lambda);
-            RGB roundTrip = film.ToOutputRGB(spec, lambda);
-
-            predMax = std::max({predMax, pred.r, pred.g, pred.b});
-            for (int c = 0; c < NSpectrumSamples; ++c)
-                specMax = std::max(specMax, spec[c]);
-            roundTripMax = std::max(
-                {roundTripMax, float(roundTrip.r), float(roundTrip.g), float(roundTrip.b)});
-        }
-        fprintf(stderr,
-                "NRC bootstrap round-trip (sample=%d):\npredictionRGBMax=%.9g\n"
-                "spectrumMax=%.9g\nroundTripRGBMax=%.9g\n\n",
-                nrcSampleCounter, predMax, specMax, roundTripMax);
-    }
-
     // Walk each training suffix backward from its last finalized vertex to
     // the render-query vertex (slot 0), seeding the recursion with the
-    // bootstrap prediction (heuristic/cap end) or zero (natural end -- the
-    // last vertex's own local contribution needs no continuation). Every
-    // step here is a plain multiply-add in spectral space; nothing is ever
-    // divided by a throughput.
+    // network's own bootstrap prediction (heuristic/cap end) or zero
+    // (natural end -- the last vertex's own local contribution needs no
+    // continuation). Everything here is spectral: the network's bootstrap
+    // output is kNRCOutputDims == NSpectrumSamples raw radiance samples at
+    // this suffix's own lambda (see the input row's wavelength dims in
+    // surfscatter.cpp), so it's used directly as Lnext with no RGB
+    // round-trip. `local`/`step` are likewise already spectral. The target
+    // written for each slot is the raw spectral Ls -- RGB conversion never
+    // happens here at all; it happens exactly once, where PBRT's film
+    // normally converts a final spectral path contribution to a pixel.
     {
         const uint8_t *terminatedByHeuristic = nrcSuffixTerminatedByHeuristic;
         const uint8_t *suffixLen = nrcSuffixLen;
@@ -1567,8 +1551,6 @@ void WavefrontPathIntegrator::NRCTrainingSuffixFinish() {
         const float *step = nrcSuffixStep;
         float *target = nrcSuffixTarget;
         const float *bootstrapOutputs = nrcInferenceOutputs;
-        auto *psState = &pixelSampleState;
-        const RGBColorSpace *colorSpace = RGBColorSpace::sRGB;
         const uint32_t cap = kNRCMaxSuffixLen;
         const uint32_t batch = nrcBatchSize;
         const bool warmedUp = nrcWarmedUp;
@@ -1577,15 +1559,7 @@ void WavefrontPathIntegrator::NRCTrainingSuffixFinish() {
                 uint32_t m = suffixLen[i];
                 if (m == 0)
                     return;
-                SampledWavelengths lambda = psState->lambda[i];
                 SampledSpectrum Lnext(0.f);
-                // Temporary experiment: disable network bootstrap seeding
-                // entirely, even after warmup, to isolate whether the
-                // suffix/training system is stable on its own with
-                // Lnext forced to 0 for every heuristic/cap-terminated
-                // suffix. Flip this back to true to re-enable the
-                // bootstrap prediction as the continuation estimate.
-                constexpr bool kEnableBootstrapSeed = false;
                 // Only let the network's own bootstrap prediction influence
                 // targets once it's actually warmed up -- otherwise an
                 // untrained (effectively random/huge) prediction gets
@@ -1596,11 +1570,10 @@ void WavefrontPathIntegrator::NRCTrainingSuffixFinish() {
                 // heuristic/cap-terminated suffix simply contributes zero
                 // continuation (equivalent to a natural end), same as if
                 // no bootstrap query had been made at all.
-                if (kEnableBootstrapSeed && terminatedByHeuristic[i] && warmedUp) {
-                    RGB rgb(std::max(0.f, bootstrapOutputs[i * (int)kNRCOutputDims + 0]),
-                            std::max(0.f, bootstrapOutputs[i * (int)kNRCOutputDims + 1]),
-                            std::max(0.f, bootstrapOutputs[i * (int)kNRCOutputDims + 2]));
-                    Lnext = RGBUnboundedSpectrum(*colorSpace, rgb).Sample(lambda);
+                if (terminatedByHeuristic[i] && warmedUp) {
+                    for (int c = 0; c < NSpectrumSamples; ++c)
+                        Lnext[c] =
+                            std::max(0.f, bootstrapOutputs[i * (int)kNRCOutputDims + c]);
                 }
                 for (int s = int(m) - 1; s >= 0; --s) {
                     SampledSpectrum localS, stepS;
@@ -1609,11 +1582,9 @@ void WavefrontPathIntegrator::NRCTrainingSuffixFinish() {
                         stepS[c] = step[(size_t(i) * cap + s) * NSpectrumSamples + c];
                     }
                     SampledSpectrum Ls = localS + stepS * Lnext;
-                    RGB rgb = film.ToOutputRGB(Ls, lambda);
                     float *t = target + (size_t(i) * cap + s) * kNRCOutputDims;
-                    t[0] = float(rgb.r);
-                    t[1] = float(rgb.g);
-                    t[2] = float(rgb.b);
+                    for (int c = 0; c < NSpectrumSamples; ++c)
+                        t[c] = Ls[c];
                     Lnext = Ls;
                 }
             });
@@ -1622,11 +1593,10 @@ void WavefrontPathIntegrator::NRCTrainingSuffixFinish() {
 
     // Temporary: find the single suffix record with the largest target
     // magnitude produced by the recursion above, and print its full
-    // backward-recursion trace (local, step, Lnext, result at every slot).
-    // This pins down whether a huge target comes from `local` alone, from
-    // `step * Lnext`, or from compounding across a multi-step suffix.
-    // Gated to a narrow sample window and a magnitude threshold so it only
-    // fires on the rare catastrophic samples currently under investigation.
+    // backward-recursion trace (local, step, Lnext, result at every slot,
+    // all raw spectral channels now -- no RGB conversion involved). Gated
+    // to a narrow sample window and a magnitude threshold so it only fires
+    // on rare catastrophic samples.
     if (nrcSampleCounter <= 20) {
         bool found = false;
         uint32_t maxI = 0;
@@ -1656,12 +1626,12 @@ void WavefrontPathIntegrator::NRCTrainingSuffixFinish() {
                     "suffixLength=%u\nterminatedByHeuristic=%d\ntargetMax=%.9g\n\n",
                     nrcSampleCounter, i, maxS, m, (int)nrcSuffixTerminatedByHeuristic[i],
                     maxAbs);
-            SampledWavelengths lambda = pixelSampleState.lambda[i];
             SampledSpectrum Lnext(0.f);
-            // Mirrors the backward-propagation lambda above: bootstrap
-            // seeding is currently disabled (kEnableBootstrapSeed = false),
-            // so Lnext always starts at 0 here regardless of warmup/
-            // terminatedByHeuristic state.
+            if (nrcSuffixTerminatedByHeuristic[i] && nrcWarmedUp) {
+                for (int c = 0; c < NSpectrumSamples; ++c)
+                    Lnext[c] = std::max(
+                        0.f, nrcInferenceOutputs[i * (int)kNRCOutputDims + c]);
+            }
             for (int s = int(m) - 1; s >= 0; --s) {
                 SampledSpectrum localS, stepS;
                 for (int c = 0; c < NSpectrumSamples; ++c) {
@@ -1670,17 +1640,13 @@ void WavefrontPathIntegrator::NRCTrainingSuffixFinish() {
                     stepS[c] =
                         nrcSuffixStep[(size_t(i) * kNRCMaxSuffixLen + s) * NSpectrumSamples + c];
                 }
-                RGB localRGB = film.ToOutputRGB(localS, lambda);
-                RGB stepRGB = film.ToOutputRGB(stepS, lambda);
-                RGB LnextRGB = film.ToOutputRGB(Lnext, lambda);
                 SampledSpectrum Ls = localS + stepS * Lnext;
-                RGB resultRGB = film.ToOutputRGB(Ls, lambda);
                 fprintf(stderr,
-                        "  s=%d local=(%.9g,%.9g,%.9g) step=(%.9g,%.9g,%.9g) "
-                        "Lnext=(%.9g,%.9g,%.9g) result=(%.9g,%.9g,%.9g)\n",
-                        s, localRGB.r, localRGB.g, localRGB.b, stepRGB.r, stepRGB.g,
-                        stepRGB.b, LnextRGB.r, LnextRGB.g, LnextRGB.b, resultRGB.r,
-                        resultRGB.g, resultRGB.b);
+                        "  s=%d local=(%.9g,%.9g,%.9g,%.9g) step=(%.9g,%.9g,%.9g,%.9g) "
+                        "Lnext=(%.9g,%.9g,%.9g,%.9g) result=(%.9g,%.9g,%.9g,%.9g)\n",
+                        s, localS[0], localS[1], localS[2], localS[3], stepS[0],
+                        stepS[1], stepS[2], stepS[3], Lnext[0], Lnext[1], Lnext[2],
+                        Lnext[3], Ls[0], Ls[1], Ls[2], Ls[3]);
                 Lnext = Ls;
             }
             fprintf(stderr, "\n");
@@ -1703,29 +1669,37 @@ void WavefrontPathIntegrator::NRCInferenceForRenderPaths() {
 
     const uint8_t *renderQuery = nrcRenderQuery;
     const float *outputs = nrcInferenceOutputs;
+    const float *snapshotBeta = nrcSnapshotBeta;
     auto *psState = &pixelSampleState;
     const uint32_t batch = nrcBatchSize;
-    const RGBColorSpace *colorSpace = RGBColorSpace::sRGB;
     ParallelFor(
         "NRC render substitution", batch, PBRT_CPU_GPU_LAMBDA(int i) {
             if (!renderQuery[i])
                 return;
-            RGB rgb(std::max(0.f, outputs[i * (int)kNRCOutputDims + 0]),
-                    std::max(0.f, outputs[i * (int)kNRCOutputDims + 1]),
-                    std::max(0.f, outputs[i * (int)kNRCOutputDims + 2]));
-            SampledWavelengths lambda = psState->lambda[i];
-            // Predicted radiance is already the raw (throughput-weighted)
-            // continuation contribution -- see the target comment in
-            // film.cpp -- so it's added directly, with no beta multiply.
-            SampledSpectrum predicted = RGBUnboundedSpectrum(*colorSpace, rgb).Sample(lambda);
+            // The network predicts raw spectral radiance leaving the query
+            // vertex, at this path's own sampled wavelengths (see the input
+            // row's wavelength dims in surfscatter.cpp) -- independent of
+            // any particular path's history, exactly like the suffix
+            // training targets it's trained on. To turn that into this
+            // path's actual contribution, it must be weighted by the real
+            // prefix throughput that got this path to the query vertex
+            // (nrcSnapshotBeta, captured at that vertex in surfscatter.cpp),
+            // the same way a real continuation ray's radiance would be.
+            SampledSpectrum predicted;
+            for (int c = 0; c < NSpectrumSamples; ++c)
+                predicted[c] = std::max(0.f, outputs[i * (int)kNRCOutputDims + c]);
+            SampledSpectrum beta;
+            for (int c = 0; c < NSpectrumSamples; ++c)
+                beta[c] = snapshotBeta[i * NSpectrumSamples + c];
 
             SampledSpectrum Lprev = psState->L[i];
-            psState->L[i] = Lprev + predicted;
+            psState->L[i] = Lprev + beta * predicted;
         });
     cudaDeviceSynchronize();
 
     if (nrcWarmedUp && (nrcSampleCounter & 31) == 0)
-        LogNRCMagnitudeStats("prediction", nrcInferenceOutputs, nrcBatchSize, nrcRenderQuery);
+        LogNRCMagnitudeStats("prediction", nrcInferenceOutputs, nrcBatchSize,
+                             (int)kNRCOutputDims, nrcRenderQuery);
 }
 
 void WavefrontPathIntegrator::NRCDumpPredictedImage(const std::string &filename) {

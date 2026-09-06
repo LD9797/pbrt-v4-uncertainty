@@ -547,11 +547,12 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
 #ifdef PBRT_BUILD_NRC
             // This vertex was chosen as the NRC query vertex, OR is part of
             // a training path's suffix (see the area-spread tracking blocks
-            // above): capture its feature vector, matching Muller et al.
-            // 2021's 64-wide input layer 1:1. Inputs are stored column-major:
-            // kNRCInputDims raw floats per slot (encoding to the full 64 dims
-            // happens in nrc_config.json). Non-suffix rows (non-training
-            // render-query paths) are written into nrcInputs, pixelIndex==
+            // above): capture its feature vector, extending Muller et al.
+            // 2021's input layer with this path's sampled wavelengths (see
+            // integrator.h for the full dim-by-dim layout). Inputs are
+            // stored column-major: kNRCInputDims raw floats per slot
+            // (encoding happens in nrc_config.json). Non-suffix rows
+            // (non-training render-query paths) are written into nrcInputs, pixelIndex==
             // slot, so NRCInferenceForRenderPaths can query the cache for
             // them; nrcRenderQuery marks which of those still need a
             // render-time cache substitution this pass. Suffix rows (every
@@ -628,9 +629,17 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                 row[44] = Clamp(f0RGB.r, 0.f, 1.f);
                 row[45] = Clamp(f0RGB.g, 0.f, 1.f);
                 row[46] = Clamp(f0RGB.b, 0.f, 1.f);
-                // dims 47-48: padding, constant 1 (paper pads to 64 for tile alignment)
-                row[47] = 1.f;
-                row[48] = 1.f;
+                // dims 47-(47+NSpectrumSamples-1): this path's sampled
+                // wavelengths, normalized to [0,1] via [Lambda_min,
+                // Lambda_max] -> Identity. Needed so the network's spectral
+                // output (kNRCOutputDims == NSpectrumSamples channels) has a
+                // well-defined meaning: it predicts radiance AT these
+                // specific wavelengths, not an RGB triple.
+                for (int c = 0; c < NSpectrumSamples; ++c)
+                    row[47 + c] = (lambda[c] - Lambda_min) / (Lambda_max - Lambda_min);
+                // Padding, constant 1 (paper pads to 64 for tile alignment).
+                row[47 + NSpectrumSamples] = 1.f;
+                row[48 + NSpectrumSamples] = 1.f;
                 if (nrcTerminateAndSubstitute)
                     nrcRenderQuery[w.pixelIndex] = 1;
             }

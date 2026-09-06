@@ -204,9 +204,13 @@ class WavefrontPathIntegrator {
     // ---------------- Neural Radiance Cache (milestone 2) ----------------
     // Buffers are CUDA-managed and indexed by pixelIndex in [0, maxQueueSize).
     // Layouts are column-major to match tcnn::GPUMatrix:
-    //   nrcInputs: 49 raw floats per slot, matching Muller et al. 2021's NRC
-    //   input layer 1:1. Position is frequency-encoded here in PBRT (sin-only,
-    //   12 bands/axis, per the paper -- tcnn's own Frequency encoding also emits
+    //   nrcInputs: kNRCInputDims raw floats per slot, matching Muller et al.
+    //   2021's 49-wide NRC input layer plus NSpectrumSamples extra dims for
+    //   this path's sampled wavelengths (needed because the network now
+    //   outputs spectral radiance -- see below -- so its prediction is only
+    //   meaningful if it's conditioned on which wavelengths it's predicting
+    //   for). Position is frequency-encoded here in PBRT (sin-only, 12
+    //   bands/axis, per the paper -- tcnn's own Frequency encoding also emits
     //   cosine, which the paper omits) and passed through tcnn as raw Identity
     //   dims; the remaining fields are still encoded by nrc_config.json:
     //     0-35: position, normalized to [0,1] via scene bounds, then encoded as
@@ -217,9 +221,27 @@ class WavefrontPathIntegrator {
     //     41-43: diffuse albedo RGB (bsdf.rho via ToOutputRGB; raw, Identity)
     //     44-46: specular reflectance F0 RGB (Dielectric/Conductor Fresnel at
     //            normal incidence; 0 for other types; raw, Identity)
-    //     47-48: padding, constant 1 (paper pads to 64 for tcnn tile alignment)
-    //   Total encoded width: 36+8+8+4+3+3+2 = 64
-    //   nrcTargets: 3 floats per slot (signed-log-encoded RGB radiance)
+    //     47-50: sampled wavelengths (lambda[0..NSpectrumSamples-1]),
+    //            normalized to [0,1] via [Lambda_min,Lambda_max]; raw, Identity
+    //     51-52: padding, constant 1 (paper pads to 64 for tcnn tile alignment)
+    //   nrc_config.json's trailing (count-less) Identity encoding block
+    //   automatically absorbs whatever's left after the counted blocks
+    //   above, so it needs no changes when kNRCInputDims/the padding width
+    //   change.
+    //   nrcTargets/nrcSuffixTarget/nrcInferenceOutputs: NSpectrumSamples
+    //   (kNRCOutputDims) floats per slot -- raw spectral radiance samples at
+    //   this slot's own lambda, never converted to/from RGB. Converting a
+    //   deterministic RGB prediction to a synthetic SampledSpectrum (e.g.
+    //   via RGBUnboundedSpectrum::Sample()) and back through
+    //   film.ToOutputRGB() (a stochastic estimator meant for real
+    //   path-traced radiance, dividing by lambda.PDF()) was found to amplify
+    //   a modest prediction (~0.4) into the hundreds, since the wavelengths
+    //   were never importance-sampled for that synthetic spectrum's shape --
+    //   see NOTES.md-adjacent debugging history. Predicting spectral samples
+    //   directly (conditioned on lambda, dim 47-50 above) avoids that
+    //   round-trip entirely: RGB conversion happens exactly once, where
+    //   PBRT's film normally converts a final spectral path contribution to
+    //   an image pixel.
     //   nrcValid:   1 byte per slot, set only when a training record was
     //     actually written into nrcInputs/nrcTargets (i.e. this path both
     //     reached its NRC query vertex AND was selected as a training path)
@@ -243,17 +265,14 @@ class WavefrontPathIntegrator {
     //     captured the moment a path's query vertex is found (whichever of
     //     the four ways above), regardless of training/render status.
     //     nrcSnapshotBeta is the path throughput arriving at that vertex
-    //     (before any of its own scattering); nrcSnapshotL is pixelSampleState
-    //     .L just before that vertex's own NEE runs. UpdateFilm() uses
-    //     nrcSnapshotL to turn the full-path Lw into a continuation-only
-    //     training target: Lw - nrcSnapshotL, matching what
-    //     NRCInferenceForRenderPaths() adds directly at render time
-    //     (nrcSnapshotL + predicted). nrcSnapshotBeta is captured but
-    //     deliberately NOT divided into the target -- doing so blows up
-    //     whenever the throughput is small, producing huge targets and an
-    //     over-bright image.
-    static constexpr uint32_t kNRCInputDims = 49;
-    static constexpr uint32_t kNRCOutputDims = 3;
+    //     (before any of its own scattering), used by
+    //     NRCInferenceForRenderPaths() to weight the cache's spectral
+    //     prediction by this path's own prefix throughput before adding it
+    //     into L; nrcSnapshotL is pixelSampleState.L just before that
+    //     vertex's own NEE runs (currently unused bookkeeping, kept for
+    //     future diagnostics).
+    static constexpr uint32_t kNRCInputDims = 49 + NSpectrumSamples;
+    static constexpr uint32_t kNRCOutputDims = NSpectrumSamples;
 
     // Muller et al. 2021 Sec. 3.4 "Path Termination": all paths are
     // terminated according to the area-spread heuristic below, which picks
