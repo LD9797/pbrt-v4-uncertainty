@@ -218,8 +218,19 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
             // cache has actually trained on nrcWarmupSamples passes worth of
             // data -- otherwise an untrained network's predictions would get
             // permanently baked into the progressively-accumulated film.
-            nrcTerminateAndSubstitute =
-                nrcWarmedUp && nrcCaptureNow && !nrcTrainingPath[w.pixelIndex];
+            //
+            // Temporary experiment: force render-time termination/
+            // substitution off entirely (kEnableRenderSubstitution = false),
+            // regardless of warmup state, so every render path keeps
+            // bouncing normally (real NEE + indirect continuation) and the
+            // network's predictions never get baked into the film. NRC
+            // training (capture/suffix generation/NRCTrainAndInferStep)
+            // keeps running unaffected, since none of that is gated on
+            // nrcTerminateAndSubstitute. Flip back to true to re-enable
+            // render-time substitution.
+            constexpr bool kEnableRenderSubstitution = false;
+            nrcTerminateAndSubstitute = kEnableRenderSubstitution && nrcWarmedUp &&
+                                         nrcCaptureNow && !nrcTrainingPath[w.pixelIndex];
             if (nrcCaptureNow) {
                 // Snapshot the instant the query vertex is found (whichever
                 // of the four ways). No longer consumed by film.cpp (that
