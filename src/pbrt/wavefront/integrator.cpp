@@ -1573,6 +1573,13 @@ void WavefrontPathIntegrator::NRCTrainingSuffixFinish() {
                     return;
                 SampledWavelengths lambda = psState->lambda[i];
                 SampledSpectrum Lnext(0.f);
+                // Temporary experiment: disable network bootstrap seeding
+                // entirely, even after warmup, to isolate whether the
+                // suffix/training system is stable on its own with
+                // Lnext forced to 0 for every heuristic/cap-terminated
+                // suffix. Flip this back to true to re-enable the
+                // bootstrap prediction as the continuation estimate.
+                constexpr bool kEnableBootstrapSeed = false;
                 // Only let the network's own bootstrap prediction influence
                 // targets once it's actually warmed up -- otherwise an
                 // untrained (effectively random/huge) prediction gets
@@ -1583,7 +1590,7 @@ void WavefrontPathIntegrator::NRCTrainingSuffixFinish() {
                 // heuristic/cap-terminated suffix simply contributes zero
                 // continuation (equivalent to a natural end), same as if
                 // no bootstrap query had been made at all.
-                if (terminatedByHeuristic[i] && warmedUp) {
+                if (kEnableBootstrapSeed && terminatedByHeuristic[i] && warmedUp) {
                     RGB rgb(std::max(0.f, bootstrapOutputs[i * (int)kNRCOutputDims + 0]),
                             std::max(0.f, bootstrapOutputs[i * (int)kNRCOutputDims + 1]),
                             std::max(0.f, bootstrapOutputs[i * (int)kNRCOutputDims + 2]));
