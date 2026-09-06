@@ -1619,6 +1619,73 @@ void WavefrontPathIntegrator::NRCTrainingSuffixFinish() {
             });
     }
     cudaDeviceSynchronize();
+
+    // Temporary: find the single suffix record with the largest target
+    // magnitude produced by the recursion above, and print its full
+    // backward-recursion trace (local, step, Lnext, result at every slot).
+    // This pins down whether a huge target comes from `local` alone, from
+    // `step * Lnext`, or from compounding across a multi-step suffix.
+    // Gated to a narrow sample window and a magnitude threshold so it only
+    // fires on the rare catastrophic samples currently under investigation.
+    if (nrcSampleCounter <= 20) {
+        bool found = false;
+        uint32_t maxI = 0;
+        int maxS = -1;
+        float maxAbs = 0.f;
+        for (uint32_t i = 0; i < nrcBatchSize; ++i) {
+            uint32_t m = nrcSuffixLen[i];
+            for (uint32_t s = 0; s < m; ++s) {
+                const float *t =
+                    nrcSuffixTarget + (size_t(i) * kNRCMaxSuffixLen + s) * kNRCOutputDims;
+                for (int c = 0; c < (int)kNRCOutputDims; ++c) {
+                    float a = std::fabs(t[c]);
+                    if (a > maxAbs) {
+                        maxAbs = a;
+                        maxI = i;
+                        maxS = int(s);
+                        found = true;
+                    }
+                }
+            }
+        }
+        if (found && maxAbs > 1000.f) {
+            uint32_t i = maxI;
+            uint32_t m = nrcSuffixLen[i];
+            fprintf(stderr,
+                    "NRC max-target trace (sample=%d):\ni=%u\nslot=%d\n"
+                    "suffixLength=%u\nterminatedByHeuristic=%d\ntargetMax=%.9g\n\n",
+                    nrcSampleCounter, i, maxS, m, (int)nrcSuffixTerminatedByHeuristic[i],
+                    maxAbs);
+            SampledWavelengths lambda = pixelSampleState.lambda[i];
+            SampledSpectrum Lnext(0.f);
+            // Mirrors the backward-propagation lambda above: bootstrap
+            // seeding is currently disabled (kEnableBootstrapSeed = false),
+            // so Lnext always starts at 0 here regardless of warmup/
+            // terminatedByHeuristic state.
+            for (int s = int(m) - 1; s >= 0; --s) {
+                SampledSpectrum localS, stepS;
+                for (int c = 0; c < NSpectrumSamples; ++c) {
+                    localS[c] =
+                        nrcSuffixLocal[(size_t(i) * kNRCMaxSuffixLen + s) * NSpectrumSamples + c];
+                    stepS[c] =
+                        nrcSuffixStep[(size_t(i) * kNRCMaxSuffixLen + s) * NSpectrumSamples + c];
+                }
+                RGB localRGB = film.ToOutputRGB(localS, lambda);
+                RGB stepRGB = film.ToOutputRGB(stepS, lambda);
+                RGB LnextRGB = film.ToOutputRGB(Lnext, lambda);
+                SampledSpectrum Ls = localS + stepS * Lnext;
+                RGB resultRGB = film.ToOutputRGB(Ls, lambda);
+                fprintf(stderr,
+                        "  s=%d local=(%.9g,%.9g,%.9g) step=(%.9g,%.9g,%.9g) "
+                        "Lnext=(%.9g,%.9g,%.9g) result=(%.9g,%.9g,%.9g)\n",
+                        s, localRGB.r, localRGB.g, localRGB.b, stepRGB.r, stepRGB.g,
+                        stepRGB.b, LnextRGB.r, LnextRGB.g, LnextRGB.b, resultRGB.r,
+                        resultRGB.g, resultRGB.b);
+                Lnext = Ls;
+            }
+            fprintf(stderr, "\n");
+        }
+    }
 }
 
 void WavefrontPathIntegrator::NRCInferenceForRenderPaths() {
