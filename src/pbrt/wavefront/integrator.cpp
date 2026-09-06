@@ -1515,6 +1515,39 @@ void WavefrontPathIntegrator::NRCTrainingSuffixFinish() {
     LogFiniteStats("OUTPUT BEFORE TRAIN", nrcInferenceOutputs,
                    size_t(nrcBatchSize) * kNRCOutputDims);
 
+    // Temporary: focused round-trip diagnostic for the RGB -> spectrum ->
+    // RGB conversion applied to the network's own bootstrap prediction,
+    // isolated from any suffix step-product amplification. Narrow window
+    // around where warmup ends (sample 16 by default), where the target
+    // explosion is observed to begin.
+    if (nrcSampleCounter >= 14 && nrcSampleCounter <= 18) {
+        float predMax = 0.f, specMax = 0.f, roundTripMax = 0.f;
+        const uint8_t *terminatedByHeuristic = nrcSuffixTerminatedByHeuristic;
+        const float *bootstrapOutputs = nrcInferenceOutputs;
+        const RGBColorSpace *colorSpace = RGBColorSpace::sRGB;
+        auto *psState = &pixelSampleState;
+        for (uint32_t i = 0; i < nrcBatchSize; ++i) {
+            if (!terminatedByHeuristic[i])
+                continue;
+            RGB pred(std::max(0.f, bootstrapOutputs[i * (int)kNRCOutputDims + 0]),
+                     std::max(0.f, bootstrapOutputs[i * (int)kNRCOutputDims + 1]),
+                     std::max(0.f, bootstrapOutputs[i * (int)kNRCOutputDims + 2]));
+            SampledWavelengths lambda = psState->lambda[i];
+            SampledSpectrum spec = RGBUnboundedSpectrum(*colorSpace, pred).Sample(lambda);
+            RGB roundTrip = film.ToOutputRGB(spec, lambda);
+
+            predMax = std::max({predMax, pred.r, pred.g, pred.b});
+            for (int c = 0; c < NSpectrumSamples; ++c)
+                specMax = std::max(specMax, spec[c]);
+            roundTripMax = std::max(
+                {roundTripMax, float(roundTrip.r), float(roundTrip.g), float(roundTrip.b)});
+        }
+        fprintf(stderr,
+                "NRC bootstrap round-trip (sample=%d):\npredictionRGBMax=%.9g\n"
+                "spectrumMax=%.9g\nroundTripRGBMax=%.9g\n\n",
+                nrcSampleCounter, predMax, specMax, roundTripMax);
+    }
+
     // Walk each training suffix backward from its last finalized vertex to
     // the render-query vertex (slot 0), seeding the recursion with the
     // bootstrap prediction (heuristic/cap end) or zero (natural end -- the
