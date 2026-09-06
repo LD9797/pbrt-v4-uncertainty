@@ -411,6 +411,9 @@ namespace {
 void LogSuffixLocalStats(const char *label, const float *local,
                          const uint8_t *suffixLen, uint32_t batch, uint32_t cap,
                          int nChannels);
+void LogSuffixStepStats(const char *label, const float *step,
+                        const uint8_t *suffixLen, uint32_t batch, uint32_t cap,
+                        int nChannels);
 }  // namespace
 #endif  // PBRT_BUILD_NRC
 
@@ -611,6 +614,9 @@ Float WavefrontPathIntegrator::Render() {
                     LogSuffixLocalStats("nrcSuffixLocal", nrcSuffixLocal, nrcSuffixLen,
                                        nrcBatchSize, kNRCMaxSuffixLen,
                                        (int)NSpectrumSamples);
+                    LogSuffixStepStats("nrcSuffixStep", nrcSuffixStep, nrcSuffixLen,
+                                      nrcBatchSize, kNRCMaxSuffixLen,
+                                      (int)NSpectrumSamples);
                 }
                 NRCTrainingSuffixFinish();
                 // Current scanline pass has finished gathering valid training samples.
@@ -1304,6 +1310,62 @@ void LogFiniteStats(const char *name, const float *data, size_t count) {
 
     fprintf(stderr, "NRC %s: count=%zu nan=%zu inf=%zu min=%.9g max=%.9g\n", name,
             count, nanCount, infCount, minV, maxV);
+}
+
+// Diagnostic: like LogSuffixLocalStats, but for the per-suffix-vertex step
+// factor (f*cos/pdf) buffer, plus NaN/Inf detection and the maximum
+// per-suffix *product* of per-vertex step magnitudes -- since
+// NRCTrainingSuffixFinish()'s backward recursion multiplies one step[]
+// factor into Lnext per vertex as it walks backward, a suffix with several
+// moderately-large steps (e.g. 10 * 8 * 12 = 960) can amplify even a small
+// bootstrap prediction into a huge target, which is otherwise invisible in
+// per-slot-only statistics.
+void LogSuffixStepStats(const char *label, const float *step,
+                        const uint8_t *suffixLen, uint32_t batch, uint32_t cap,
+                        int nChannels) {
+    std::vector<float> mags;
+    size_t nanCount = 0, infCount = 0;
+    float maxProduct = 0.f;
+    for (uint32_t i = 0; i < batch; ++i) {
+        uint32_t m = suffixLen[i];
+        if (m == 0)
+            continue;
+        float product = 1.f;
+        for (uint32_t s = 0; s < m; ++s) {
+            const float *v = step + (size_t(i) * cap + s) * nChannels;
+            float mag = 0.f;
+            for (int c = 0; c < nChannels; ++c) {
+                float x = v[c];
+                if (std::isnan(x)) {
+                    ++nanCount;
+                    continue;
+                }
+                if (std::isinf(x)) {
+                    ++infCount;
+                    continue;
+                }
+                mag = std::max(mag, x);
+            }
+            mags.push_back(mag);
+            product *= mag;
+        }
+        maxProduct = std::max(maxProduct, product);
+    }
+    if (mags.empty()) {
+        fprintf(stderr, "NRC %s:\ncount=0\nnan=%zu\ninf=%zu\n\n", label, nanCount,
+                infCount);
+        return;
+    }
+    std::sort(mags.begin(), mags.end());
+    size_t n = mags.size();
+    float minVal = mags.front();
+    float maxVal = mags.back();
+    float p99 = mags[std::min(n - 1, size_t(0.99 * n))];
+    float p999 = mags[std::min(n - 1, size_t(0.999 * n))];
+    fprintf(stderr,
+            "NRC %s:\ncount=%zu\nnan=%zu\ninf=%zu\nmin=%.9g\nmax=%.9g\np99=%.9g\n"
+            "p99.9=%.9g\nmaxSuffixProduct=%.9g\n\n",
+            label, n, nanCount, infCount, minVal, maxVal, p99, p999, maxProduct);
 }
 }  // namespace
 
