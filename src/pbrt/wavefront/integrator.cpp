@@ -234,7 +234,13 @@ WavefrontPathIntegrator::WavefrontPathIntegrator(
     // Compute number of scanlines to render per pass
     Vector2i resolution = film.PixelBounds().Diagonal();
     // TODO: make this configurable. Base it on the amount of GPU memory?
-    int maxSamples = 1024 * 1024;
+    // Temporary experiment: bumped way up (was 1024 * 1024) to force
+    // Crown into a single scanline pass, confirming whether the NRC
+    // cache-state discontinuity between passes (network trained between
+    // passes, so each pass renders with a different cache state) is the
+    // cause of the horizontal-split artifact. Revert to 1024 * 1024
+    // once confirmed/fixed.
+    int maxSamples = 4 * 1024 * 1024;
     scanlinesPerPass = std::max(1, maxSamples / resolution.x);
     int nPasses = (resolution.y + scanlinesPerPass - 1) / scanlinesPerPass;
     scanlinesPerPass = (resolution.y + nPasses - 1) / nPasses;
@@ -1551,11 +1557,9 @@ void WavefrontPathIntegrator::NRCTrainingSuffixFinish() {
     // Walk each training suffix backward from its last finalized vertex to
     // the render-query vertex (slot 0), seeding the recursion with the
     // bootstrap prediction (heuristic/cap end) or zero (natural end -- the
-    // last vertex's own local contribution needs no continuation). The
-    // recursion is carried out entirely in RGB (see the comment inside the
-    // lambda below for why): only the real path-traced `local`/`step`
-    // spectral quantities are ever converted via ToOutputRGB, never the
-    // network's own already-RGB prediction.
+    // last vertex's own local contribution needs no continuation). Every
+    // step here is a plain multiply-add in spectral space; nothing is ever
+    // divided by a throughput.
     {
         const uint8_t *terminatedByHeuristic = nrcSuffixTerminatedByHeuristic;
         const uint8_t *suffixLen = nrcSuffixLen;
@@ -1564,6 +1568,7 @@ void WavefrontPathIntegrator::NRCTrainingSuffixFinish() {
         float *target = nrcSuffixTarget;
         const float *bootstrapOutputs = nrcInferenceOutputs;
         auto *psState = &pixelSampleState;
+        const RGBColorSpace *colorSpace = RGBColorSpace::sRGB;
         const uint32_t cap = kNRCMaxSuffixLen;
         const uint32_t batch = nrcBatchSize;
         const bool warmedUp = nrcWarmedUp;
@@ -1573,23 +1578,14 @@ void WavefrontPathIntegrator::NRCTrainingSuffixFinish() {
                 if (m == 0)
                     return;
                 SampledWavelengths lambda = psState->lambda[i];
-                // Everything here is done directly in RGB, never round-
-                // tripping the network's own (already-RGB) prediction
-                // through a synthetic spectral sample. Converting an
-                // arbitrary known RGB value to a SampledSpectrum via
-                // RGBUnboundedSpectrum::Sample() and then immediately
-                // back to RGB via film.ToOutputRGB() (which divides by
-                // lambda.PDF(), a stochastic estimator meant for real
-                // path-traced radiance) can amplify a modest RGB value
-                // (~0.4) into the hundreds, since the sampled wavelengths
-                // were never importance-sampled for this synthetic
-                // spectrum's shape. `local` and `step` are real spectral
-                // quantities from actual path sampling with correctly
-                // matched pdfs, so converting THOSE to RGB (once each,
-                // below) is the legitimate, low-variance use of
-                // ToOutputRGB -- it's the same conversion the renderer
-                // already relies on elsewhere for image radiance.
-                RGB LnextRGB(0.f, 0.f, 0.f);
+                SampledSpectrum Lnext(0.f);
+                // Temporary experiment: disable network bootstrap seeding
+                // entirely, even after warmup, to isolate whether the
+                // suffix/training system is stable on its own with
+                // Lnext forced to 0 for every heuristic/cap-terminated
+                // suffix. Flip this back to true to re-enable the
+                // bootstrap prediction as the continuation estimate.
+                constexpr bool kEnableBootstrapSeed = false;
                 // Only let the network's own bootstrap prediction influence
                 // targets once it's actually warmed up -- otherwise an
                 // untrained (effectively random/huge) prediction gets
@@ -1600,10 +1596,11 @@ void WavefrontPathIntegrator::NRCTrainingSuffixFinish() {
                 // heuristic/cap-terminated suffix simply contributes zero
                 // continuation (equivalent to a natural end), same as if
                 // no bootstrap query had been made at all.
-                if (terminatedByHeuristic[i] && warmedUp) {
-                    LnextRGB = RGB(std::max(0.f, bootstrapOutputs[i * (int)kNRCOutputDims + 0]),
-                                   std::max(0.f, bootstrapOutputs[i * (int)kNRCOutputDims + 1]),
-                                   std::max(0.f, bootstrapOutputs[i * (int)kNRCOutputDims + 2]));
+                if (kEnableBootstrapSeed && terminatedByHeuristic[i] && warmedUp) {
+                    RGB rgb(std::max(0.f, bootstrapOutputs[i * (int)kNRCOutputDims + 0]),
+                            std::max(0.f, bootstrapOutputs[i * (int)kNRCOutputDims + 1]),
+                            std::max(0.f, bootstrapOutputs[i * (int)kNRCOutputDims + 2]));
+                    Lnext = RGBUnboundedSpectrum(*colorSpace, rgb).Sample(lambda);
                 }
                 for (int s = int(m) - 1; s >= 0; --s) {
                     SampledSpectrum localS, stepS;
@@ -1611,14 +1608,13 @@ void WavefrontPathIntegrator::NRCTrainingSuffixFinish() {
                         localS[c] = local[(size_t(i) * cap + s) * NSpectrumSamples + c];
                         stepS[c] = step[(size_t(i) * cap + s) * NSpectrumSamples + c];
                     }
-                    RGB localRGB = film.ToOutputRGB(localS, lambda);
-                    RGB stepRGB = film.ToOutputRGB(stepS, lambda);
-                    RGB rgb = localRGB + stepRGB * LnextRGB;
+                    SampledSpectrum Ls = localS + stepS * Lnext;
+                    RGB rgb = film.ToOutputRGB(Ls, lambda);
                     float *t = target + (size_t(i) * cap + s) * kNRCOutputDims;
                     t[0] = float(rgb.r);
                     t[1] = float(rgb.g);
                     t[2] = float(rgb.b);
-                    LnextRGB = rgb;
+                    Lnext = Ls;
                 }
             });
     }
