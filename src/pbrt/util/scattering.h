@@ -137,6 +137,14 @@ class TrowbridgeReitzDistribution {
     bool EffectivelySmooth() const { return std::max(alpha_x, alpha_y) < 1e-3f; }
 
     PBRT_CPU_GPU
+    Float AverageAlpha() const { return .5f * (alpha_x + alpha_y); }
+
+    PBRT_CPU_GPU
+    Float AlphaX() const { return alpha_x; }
+    PBRT_CPU_GPU
+    Float AlphaY() const { return alpha_y; }
+
+    PBRT_CPU_GPU
     Float G1(Vector3f w) const { return 1 / (1 + Lambda(w)); }
 
     PBRT_CPU_GPU

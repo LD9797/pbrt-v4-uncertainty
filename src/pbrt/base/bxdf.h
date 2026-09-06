@@ -171,6 +171,10 @@ class BxDF
     // BxDF Interface
     PBRT_CPU_GPU inline BxDFFlags Flags() const;
 
+    // Scalar roughness in [0,1]; 0 = perfectly specular, 1 = fully diffuse.
+    // Types with no roughness concept (e.g. measured BRDFs) return a fixed guess.
+    PBRT_CPU_GPU inline Float Roughness() const;
+
     using TaggedPointer::TaggedPointer;
 
     std::string ToString() const;

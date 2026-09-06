@@ -15,6 +15,7 @@
 #include <pbrt/util/containers.h>
 #include <pbrt/util/spectrum.h>
 #include <pbrt/util/vecmath.h>
+#include <pbrt/media.h>
 #include <pbrt/wavefront/integrator.h>
 
 #include <type_traits>
@@ -144,6 +145,176 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
             if (regularize && w.anyNonSpecularBounces)
                 bsdf.Regularize();
 
+            // Set below (NRC builds only) when this vertex terminates a
+            // non-training path via the cache instead of a real continuation
+            // ray; declared unconditionally so the BSDF-sampling/NEE code
+            // further down can guard on it without more #ifdefs.
+            bool nrcTerminateAndSubstitute = false;
+
+#ifdef PBRT_BUILD_NRC
+            // NRC milestone 3: track the Muller et al. 2021 area-spread path
+            // termination heuristic (Sec. 3.4) to choose the query vertex
+            // dynamically per path -- see the long comment on
+            // kNRCSpreadC/nrcPathSpreadAccum in integrator.h for the exact
+            // formulas. Per Muller et al., "all paths are terminated according
+            // to" this heuristic -- it governs every rendering path, not just
+            // the sparse subset selected to generate NRC training records.
+            // nrcReachedQueryVertex (distinct from nrcValid, which marks a
+            // written training record) tracks whether THIS path has already
+            // found its query vertex, so spread tracking never re-runs after
+            // that point even for non-training paths. nrcTrainingPath only
+            // gates whether the query vertex we find gets written into
+            // nrcInputs/nrcTargets below.
+            bool nrcSpreadActive =
+                nrcInputs != nullptr && !nrcReachedQueryVertex[w.pixelIndex];
+            // Set to true once this vertex is determined to be the query
+            // vertex, either because the accumulated spread crossed the
+            // threshold or because the path is about to end for some other
+            // reason (max depth, Russian roulette, no valid BSDF sample).
+            bool nrcCaptureNow = false;
+            if (nrcSpreadActive) {
+                Point3f p(w.pi);
+                Float cosThetaHere = AbsDot(w.wo, ns);
+                if (w.depth == 0) {
+                    // Primary vertex x1: establish the Eq. 4 baseline a0 from
+                    // the camera-to-x1 distance, and start the Eq. 3 spread
+                    // sum fresh (it accumulates segments x1-x2, x2-x3, ...).
+                    Float d1Sq = DistanceSquared(nrcPathPrevP[w.pixelIndex], p);
+                    nrcPathA0[w.pixelIndex] =
+                        d1Sq / (4 * Pi * std::max<Float>(cosThetaHere, 1e-6f));
+                    nrcPathSpreadAccum[w.pixelIndex] = 0.f;
+                } else {
+                    // Vertex x_i, i = depth+1 >= 2: accumulate this segment's
+                    // contribution to Eq. 3 and test against c * a0.
+                    Float dSq = DistanceSquared(nrcPathPrevP[w.pixelIndex], p);
+                    Float pdfPrev = std::max<Float>(nrcPathPrevPdf[w.pixelIndex], 1e-6f);
+                    Float term =
+                        std::sqrt(dSq / (pdfPrev * std::max<Float>(cosThetaHere, 1e-6f)));
+                    Float accum = nrcPathSpreadAccum[w.pixelIndex] + term;
+                    nrcPathSpreadAccum[w.pixelIndex] = accum;
+                    if (Sqr(accum) > kNRCSpreadC * nrcPathA0[w.pixelIndex])
+                        nrcCaptureNow = true;
+                }
+                // Not the only way a path can stop: this is also the last
+                // vertex EvaluateMaterialsAndBSDFs will ever process for this
+                // ray, since the wavefront loop breaks once wavefrontDepth ==
+                // maxDepth (see Render()) without shading that final hit.
+                if (w.depth == maxDepth - 1)
+                    nrcCaptureNow = true;
+                if (nrcCaptureNow)
+                    nrcReachedQueryVertex[w.pixelIndex] = 1;
+            }
+            // nrcTerminateAndSubstitute: true only for a *non-training* path
+            // whose query vertex was just chosen by the area-spread
+            // heuristic or max-depth truncation above -- the two cases where
+            // the path would otherwise keep bouncing at real expense. (Russian
+            // roulette and an invalid BSDF sample, checked further below, are
+            // natural dead ends with no continuation left to approximate, so
+            // they never set this flag.) Such paths skip their own NEE and
+            // indirect bounce below; NRCInferenceForRenderPaths() queries the
+            // cache for all of them after this scanline pass's depth loop and
+            // substitutes beta * predicted radiance for the skipped work.
+            // Gated on nrcWarmedUp so substitution never engages until the
+            // cache has actually trained on nrcWarmupSamples passes worth of
+            // data -- otherwise an untrained network's predictions would get
+            // permanently baked into the progressively-accumulated film.
+            //
+            // Temporary experiment: force render-time termination/
+            // substitution off entirely (kEnableRenderSubstitution = false),
+            // regardless of warmup state, so every render path keeps
+            // bouncing normally (real NEE + indirect continuation) and the
+            // network's predictions never get baked into the film. NRC
+            // training (capture/suffix generation/NRCTrainAndInferStep)
+            // keeps running unaffected, since none of that is gated on
+            // nrcTerminateAndSubstitute. Flip back to true to re-enable
+            // render-time substitution.
+            constexpr bool kEnableRenderSubstitution = false;
+            nrcTerminateAndSubstitute = kEnableRenderSubstitution && nrcWarmedUp &&
+                                         nrcCaptureNow && !nrcTrainingPath[w.pixelIndex];
+            if (nrcCaptureNow) {
+                // Snapshot the instant the query vertex is found (whichever
+                // of the four ways). No longer consumed by film.cpp (that
+                // mechanism was replaced by the training-suffix records
+                // below), but nrcSnapshotBeta/L are left in place as cheap,
+                // harmless bookkeeping in case a future diagnostic wants them.
+                for (int c = 0; c < NSpectrumSamples; ++c)
+                    nrcSnapshotBeta[w.pixelIndex * NSpectrumSamples + c] = w.beta[c];
+                SampledSpectrum nrcLSoFar = pixelSampleState.L[w.pixelIndex];
+                for (int c = 0; c < NSpectrumSamples; ++c)
+                    nrcSnapshotL[w.pixelIndex * NSpectrumSamples + c] = nrcLSoFar[c];
+
+                // Training paths don't terminate here -- they never did --
+                // but the continuation past this vertex is now explicitly
+                // tracked as a "training suffix" (Muller et al. Fig. 4). A
+                // FRESH local throughput is reset to 1 here so later
+                // per-vertex targets are built by forward multiplication
+                // only -- never by dividing a possibly-tiny real throughput
+                // (the bug that caused the earlier over-bright render).
+                // Dead-end query vertices (invalid BSDF sample / Russian
+                // roulette, handled further below) don't get a suffix:
+                // there's no real continuation to approximate for them.
+                if (nrcTrainingPath[w.pixelIndex]) {
+                    nrcSuffixActive[w.pixelIndex] = 1;
+                    nrcSuffixLen[w.pixelIndex] = 0;
+                    nrcSuffixTerminatedByHeuristic[w.pixelIndex] = 0;
+                    for (int c = 0; c < NSpectrumSamples; ++c) {
+                        nrcSuffixBeta[w.pixelIndex * NSpectrumSamples + c] = 1.f;
+                        nrcSuffixLocal[w.pixelIndex * kNRCMaxSuffixLen * NSpectrumSamples +
+                                       c] = 0.f;
+                    }
+                    Float d1Sq = DistanceSquared(nrcPathPrevP[w.pixelIndex], Point3f(w.pi));
+                    Float cosSuffixHere = AbsDot(w.wo, ns);
+                    nrcSuffixA0[w.pixelIndex] =
+                        d1Sq / (4 * Pi * std::max<Float>(cosSuffixHere, 1e-6f));
+                    nrcSuffixSpreadAccum[w.pixelIndex] = 0.f;
+                    // Seed the suffix's OWN previous-vertex state from the
+                    // render path's here (the vertex just before the
+                    // render-query vertex, which IS the right "previous
+                    // vertex" for the suffix's first segment) -- then it
+                    // evolves completely independently of nrcPathPrevP/Pdf
+                    // from here on, since the render path keeps updating
+                    // those for its OWN (now-dormant) heuristic.
+                    nrcSuffixPrevP[w.pixelIndex] = nrcPathPrevP[w.pixelIndex];
+                    nrcSuffixPrevPdf[w.pixelIndex] = nrcPathPrevPdf[w.pixelIndex];
+                }
+            }
+
+            // If this path is (now, or already) tracking a training suffix,
+            // capture this vertex's slot and, for vertices after the
+            // render-query vertex itself (slot >= 1), re-apply the SAME
+            // area-spread heuristic independently -- Muller et al. explicitly
+            // treat the render-query vertex as the new "primary vertex" for
+            // this second test. A hard cap of kNRCMaxSuffixLen vertices
+            // backstops this against runaway GPU memory use. This never
+            // touches nrcTerminateAndSubstitute: a training path's real
+            // contribution to the rendered image must keep tracing normally
+            // no matter where its suffix ends.
+            uint32_t nrcSuffixSlot = 0;
+            bool nrcSuffixTrackThisVertex = nrcSuffixActive[w.pixelIndex];
+            bool nrcSuffixIsBootstrapVertex = false;
+            if (nrcSuffixTrackThisVertex) {
+                nrcSuffixSlot = nrcSuffixLen[w.pixelIndex];
+                if (nrcSuffixSlot > 0) {
+                    Point3f p(w.pi);
+                    Float cosThetaHere = AbsDot(w.wo, ns);
+                    Float dSq = DistanceSquared(nrcSuffixPrevP[w.pixelIndex], p);
+                    Float pdfPrev = std::max<Float>(nrcSuffixPrevPdf[w.pixelIndex], 1e-6f);
+                    Float term =
+                        std::sqrt(dSq / (pdfPrev * std::max<Float>(cosThetaHere, 1e-6f)));
+                    Float accum = nrcSuffixSpreadAccum[w.pixelIndex] + term;
+                    nrcSuffixSpreadAccum[w.pixelIndex] = accum;
+                    if (Sqr(accum) > kNRCSpreadC * nrcSuffixA0[w.pixelIndex])
+                        nrcSuffixIsBootstrapVertex = true;
+                }
+                if (nrcSuffixSlot >= kNRCMaxSuffixLen - 1)
+                    nrcSuffixIsBootstrapVertex = true;
+                if (nrcSuffixIsBootstrapVertex) {
+                    nrcSuffixTerminatedByHeuristic[w.pixelIndex] = 1;
+                    nrcSuffixActive[w.pixelIndex] = 0;  // stop tracking further vertices
+                }
+            }
+#endif
+
             // Initialize _VisibleSurface_ at first intersection if necessary
             if (w.depth == 0 && initializeVisibleSurface) {
                 SurfaceInteraction isect;
@@ -182,8 +353,31 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
             // Sample BSDF and enqueue indirect ray at intersection point
             Vector3f wo = w.wo;
             RaySamples raySamples = pixelSampleState.samples[w.pixelIndex];
+            if (!nrcTerminateAndSubstitute) {
             pstd::optional<BSDFSample> bsdfSample = bsdf.Sample_f<ConcreteBxDF>(
                 wo, raySamples.indirect.uc, raySamples.indirect.u);
+#ifdef PBRT_BUILD_NRC
+            // No valid outgoing direction: the path ends at this vertex, so
+            // it becomes the query vertex if nothing has captured yet.
+            if (!bsdfSample) {
+                if (nrcSpreadActive) {
+                    nrcCaptureNow = true;
+                    nrcReachedQueryVertex[w.pixelIndex] = 1;
+                    for (int c = 0; c < NSpectrumSamples; ++c)
+                        nrcSnapshotBeta[w.pixelIndex * NSpectrumSamples + c] = w.beta[c];
+                    SampledSpectrum nrcLSoFar = pixelSampleState.L[w.pixelIndex];
+                    for (int c = 0; c < NSpectrumSamples; ++c)
+                        nrcSnapshotL[w.pixelIndex * NSpectrumSamples + c] = nrcLSoFar[c];
+                }
+                // Suffix vertex died naturally (no continuation to
+                // approximate): finalize this slot as the suffix's last
+                // vertex, no bootstrap needed.
+                if (nrcSuffixTrackThisVertex && !nrcSuffixIsBootstrapVertex) {
+                    nrcSuffixLen[w.pixelIndex] = nrcSuffixSlot + 1;
+                    nrcSuffixActive[w.pixelIndex] = 0;
+                }
+            }
+#endif
             if (bsdfSample) {
                 // Compute updated path throughput and PDFs and enqueue indirect ray
                 Vector3f wi = bsdfSample->wi;
@@ -210,6 +404,13 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                 // Apply Russian roulette to indirect ray based on weighted path
                 // throughput
                 SampledSpectrum rrBeta = beta * etaScale / r_u.Average();
+#ifdef PBRT_BUILD_NRC
+                // Multiplicative correction from Russian roulette survival,
+                // applied below to the suffix's local step factor too --
+                // computed directly (never by dividing beta by w.beta) so it
+                // stays well-behaved regardless of how small w.beta is.
+                Float nrcSuffixRRFactor = 1.f;
+#endif
                 // Note: depth >= 1 here to match VolPathIntegrator (which increments
                 // depth earlier).
                 if (rrBeta.MaxComponentValue() < 1 && w.depth >= 1) {
@@ -217,9 +418,36 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                     if (raySamples.indirect.rr < q) {
                         beta = SampledSpectrum(0.f);
                         PBRT_DBG("Path terminated with RR\n");
-                    } else
+                    } else {
                         beta /= 1 - q;
+#ifdef PBRT_BUILD_NRC
+                        nrcSuffixRRFactor = 1.f / (1.f - q);
+#endif
+                    }
                 }
+
+#ifdef PBRT_BUILD_NRC
+                // Russian roulette (or f=0/pdf=0 upstream) killed the path:
+                // no further vertex will exist, so this one becomes the query
+                // vertex if nothing has captured yet.
+                if (!beta) {
+                    if (nrcSpreadActive) {
+                        nrcCaptureNow = true;
+                        nrcReachedQueryVertex[w.pixelIndex] = 1;
+                        for (int c = 0; c < NSpectrumSamples; ++c)
+                            nrcSnapshotBeta[w.pixelIndex * NSpectrumSamples + c] = w.beta[c];
+                        SampledSpectrum nrcLSoFar = pixelSampleState.L[w.pixelIndex];
+                        for (int c = 0; c < NSpectrumSamples; ++c)
+                            nrcSnapshotL[w.pixelIndex * NSpectrumSamples + c] = nrcLSoFar[c];
+                    }
+                    // Same natural-end finalization as the invalid-BSDF-sample
+                    // case above, but after Russian roulette kills the path.
+                    if (nrcSuffixTrackThisVertex && !nrcSuffixIsBootstrapVertex) {
+                        nrcSuffixLen[w.pixelIndex] = nrcSuffixSlot + 1;
+                        nrcSuffixActive[w.pixelIndex] = 0;
+                    }
+                }
+#endif
 
                 if (beta) {
                     // Initialize spawned ray and enqueue for next ray depth
@@ -256,9 +484,169 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                             SafeDiv(beta, r_u)[1], SafeDiv(beta, r_u)[2],
                             SafeDiv(beta, r_u)[3]);
                     }
+
+#ifdef PBRT_BUILD_NRC
+                    // Path continues past this vertex: remember it as x_{i-1}
+                    // and the pdf used to sample wi as p(w_i | x_{i-1}) for
+                    // the next vertex's Eq. 3 segment contribution.
+                    if (nrcSpreadActive && !nrcCaptureNow) {
+                        nrcPathPrevP[w.pixelIndex] = Point3f(w.pi);
+                        nrcPathPrevPdf[w.pixelIndex] =
+                            bsdfSample->pdfIsProportional
+                                ? bsdf.PDF<ConcreteBxDF>(wo, bsdfSample->wi)
+                                : bsdfSample->pdf;
+                    }
+                    // Training suffix: record this vertex's step factor (the
+                    // SAME f*cos/pdf, times the RR survival correction, that
+                    // updates the real beta -- just never multiplied by
+                    // anything upstream) and advance to the next slot.
+                    // Skipped for the bootstrap vertex: it gets no record of
+                    // its own, only its input features (written below) for
+                    // the NRC query.
+                    if (nrcSuffixTrackThisVertex && !nrcSuffixIsBootstrapVertex) {
+                        SampledSpectrum suffixStep = bsdfSample->f * AbsDot(wi, ns) /
+                                                     bsdfSample->pdf * nrcSuffixRRFactor;
+                        SampledSpectrum newSuffixBeta;
+                        for (int c = 0; c < NSpectrumSamples; ++c) {
+                            nrcSuffixStep[(size_t(w.pixelIndex) * kNRCMaxSuffixLen +
+                                          nrcSuffixSlot) *
+                                              NSpectrumSamples +
+                                          c] = suffixStep[c];
+                            newSuffixBeta[c] =
+                                nrcSuffixBeta[w.pixelIndex * NSpectrumSamples + c] *
+                                suffixStep[c];
+                        }
+                        uint32_t nextSlot = nrcSuffixSlot + 1;
+                        for (int c = 0; c < NSpectrumSamples; ++c) {
+                            nrcSuffixBeta[w.pixelIndex * NSpectrumSamples + c] =
+                                newSuffixBeta[c];
+                            nrcSuffixLocal[(size_t(w.pixelIndex) * kNRCMaxSuffixLen +
+                                           nextSlot) *
+                                               NSpectrumSamples +
+                                           c] = 0.f;
+                        }
+                        // Advance the suffix's OWN previous-vertex state
+                        // (independent of nrcPathPrevP/Pdf, which belong to
+                        // the render path's now-dormant heuristic) so the
+                        // NEXT suffix vertex's Eq. 3 segment measures
+                        // distance/pdf from THIS vertex, not from wherever
+                        // the render path happened to be before the
+                        // render-query vertex.
+                        nrcSuffixPrevP[w.pixelIndex] = Point3f(w.pi);
+                        nrcSuffixPrevPdf[w.pixelIndex] =
+                            bsdfSample->pdfIsProportional
+                                ? bsdf.PDF<ConcreteBxDF>(wo, bsdfSample->wi)
+                                : bsdfSample->pdf;
+                        nrcSuffixLen[w.pixelIndex] = nextSlot;
+                    }
+#endif
                 }
             }
+            }  // !nrcTerminateAndSubstitute
 
+#ifdef PBRT_BUILD_NRC
+            // This vertex was chosen as the NRC query vertex, OR is part of
+            // a training path's suffix (see the area-spread tracking blocks
+            // above): capture its feature vector, extending Muller et al.
+            // 2021's input layer with this path's sampled wavelengths (see
+            // integrator.h for the full dim-by-dim layout). Inputs are
+            // stored column-major: kNRCInputDims raw floats per slot
+            // (encoding happens in nrc_config.json). Non-suffix rows
+            // (non-training render-query paths) are written into nrcInputs, pixelIndex==
+            // slot, so NRCInferenceForRenderPaths can query the cache for
+            // them; nrcRenderQuery marks which of those still need a
+            // render-time cache substitution this pass. Suffix rows (every
+            // vertex of a training path's suffix, including the
+            // bootstrap-only one) are written into nrcSuffixInputs instead --
+            // nrcValid/nrcInputs are no longer used for training paths at
+            // all; their supervision comes entirely from the training-suffix
+            // mechanism (NRCTrainingSuffixFinish() in integrator.cpp).
+            if (nrcCaptureNow || nrcSuffixTrackThisVertex) {
+                // Albedo: hemispherical-directional reflectance.
+                constexpr int nRhoSamples = 16;
+                const Float ucRho[nRhoSamples] = {
+                    0.75741637, 0.37870818, 0.7083487, 0.18935409, 0.9149363, 0.35417435,
+                    0.5990858,  0.09467703, 0.8578725, 0.45746812, 0.686759,  0.17708716,
+                    0.9674518,  0.2995429,  0.5083201, 0.047338516};
+                const Point2f uRho[nRhoSamples] = {
+                    Point2f(0.855985, 0.570367), Point2f(0.381823, 0.851844),
+                    Point2f(0.285328, 0.764262), Point2f(0.733380, 0.114073),
+                    Point2f(0.542663, 0.344465), Point2f(0.127274, 0.414848),
+                    Point2f(0.964700, 0.947162), Point2f(0.594089, 0.643463),
+                    Point2f(0.095109, 0.170369), Point2f(0.825444, 0.263359),
+                    Point2f(0.429467, 0.454469), Point2f(0.244460, 0.816459),
+                    Point2f(0.756135, 0.731258), Point2f(0.516165, 0.152852),
+                    Point2f(0.180888, 0.214174), Point2f(0.898579, 0.503897)};
+                SampledSpectrum albedo = bsdf.rho(wo, ucRho, uRho);
+
+                Point3f p(w.pi);
+                float *row =
+                    nrcSuffixTrackThisVertex
+                        ? nrcSuffixInputs + (size_t(w.pixelIndex) * kNRCMaxSuffixLen +
+                                            nrcSuffixSlot) * kNRCInputDims
+                        : nrcInputs + size_t(w.pixelIndex) * kNRCInputDims;
+                // dims 0-35: position, normalized to [0,1] via scene bounds, then encoded
+                // with 12 sin-only frequency bands per axis (Muller et al. 2021 explicitly
+                // omit the cosine half used by NeRF-style encodings). Fed to tcnn as raw
+                // Identity dims -- the frequency expansion happens here, not in tcnn.
+                Float pn[3] = {
+                    (p.x - nrcSceneBounds.pMin.x) / (nrcSceneBounds.pMax.x - nrcSceneBounds.pMin.x),
+                    (p.y - nrcSceneBounds.pMin.y) / (nrcSceneBounds.pMax.y - nrcSceneBounds.pMin.y),
+                    (p.z - nrcSceneBounds.pMin.z) / (nrcSceneBounds.pMax.z - nrcSceneBounds.pMin.z)};
+                constexpr int nPosFreqs = 12;
+                for (int axis = 0; axis < 3; ++axis)
+                    for (int d = 0; d < nPosFreqs; ++d)
+                        row[axis * nPosFreqs + d] = std::sin(Float(1 << d) * pn[axis]);
+                // dims 36-37: outgoing direction, spherical (theta,phi) mapped to [0,1] -> OneBlob(4)
+                row[36] = std::acos(Clamp(wo.z, -1.f, 1.f)) * InvPi;
+                row[37] = (std::atan2(wo.y, wo.x) + Pi) * Inv2Pi;
+                // dims 38-39: shading normal, spherical (theta,phi) mapped to [0,1] -> OneBlob(4)
+                row[38] = std::acos(Clamp(ns.z, -1.f, 1.f)) * InvPi;
+                row[39] = (std::atan2(ns.y, ns.x) + Pi) * Inv2Pi;
+                // dim 40: roughness, transformed 1-exp(-r) per Muller et al. -> OneBlob(4)
+                row[40] = 1.f - std::exp(-bsdf.Roughness());
+                // dims 41-43: diffuse albedo (hemispherical reflectance -> sensor RGB), raw.
+                // film.ToOutputRGB() runs a Monte Carlo spectral-to-RGB estimator meant
+                // for radiance (it divides by lambda.PDF(), see PixelSensor::ToSensorRGB/
+                // SampledSpectrum::ToXYZ), so single-sample noise can push it wildly
+                // outside [0,1] even though it's actually a reflectance here. Clamping
+                // to [0,1] is a stopgap until material features get a proper stable
+                // (non-stochastic) RGB reflectance conversion.
+                RGB albedoRGB = film.ToOutputRGB(albedo, lambda);
+                row[41] = Clamp(float(albedoRGB.r), 0.f, 1.f);
+                row[42] = Clamp(float(albedoRGB.g), 0.f, 1.f);
+                row[43] = Clamp(float(albedoRGB.b), 0.f, 1.f);
+                // dims 44-46: specular reflectance F0 (Fresnel at normal incidence), raw.
+                // 0 for types with no specular-lobe concept (diffuse, hair, measured, etc.).
+                // Same clamping rationale as albedo above.
+                RGB f0RGB(0.f, 0.f, 0.f);
+                if constexpr (std::is_same_v<ConcreteBxDF, DielectricBxDF>) {
+                    Float f0 = bxdf.F0();
+                    f0RGB = RGB(f0, f0, f0);
+                } else if constexpr (std::is_same_v<ConcreteBxDF, ConductorBxDF>) {
+                    f0RGB = film.ToOutputRGB(bxdf.F0(), lambda);
+                }
+                row[44] = Clamp(f0RGB.r, 0.f, 1.f);
+                row[45] = Clamp(f0RGB.g, 0.f, 1.f);
+                row[46] = Clamp(f0RGB.b, 0.f, 1.f);
+                // dims 47-(47+NSpectrumSamples-1): this path's sampled
+                // wavelengths, normalized to [0,1] via [Lambda_min,
+                // Lambda_max] -> Identity. Needed so the network's spectral
+                // output (kNRCOutputDims == NSpectrumSamples channels) has a
+                // well-defined meaning: it predicts radiance AT these
+                // specific wavelengths, not an RGB triple.
+                for (int c = 0; c < NSpectrumSamples; ++c)
+                    row[47 + c] = (lambda[c] - Lambda_min) / (Lambda_max - Lambda_min);
+                // Padding, constant 1 (paper pads to 64 for tile alignment).
+                row[47 + NSpectrumSamples] = 1.f;
+                row[48 + NSpectrumSamples] = 1.f;
+                if (nrcTerminateAndSubstitute)
+                    nrcRenderQuery[w.pixelIndex] = 1;
+            }
+#endif
+
+
+            if (!nrcTerminateAndSubstitute) {
             // Sample light and enqueue shadow ray at intersection point
             BxDFFlags flags = bsdf.Flags();
             if (IsNonSpecular(flags)) {
@@ -312,8 +700,25 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                     ray.medium = Dot(ray.d, w.n) > 0 ? w.mediumInterface.outside
                                                      : w.mediumInterface.inside;
 
+                // Training-suffix NEE: the same beta=1 equivalent of Ld
+                // (i.e. Ld with w.beta replaced by 1) that
+                // RecordShadowRayResult (intersect.h) will add into this
+                // vertex's own nrcSuffixLocal slot if the shadow ray turns
+                // out to be unoccluded. Left at zero (a harmless no-op) for
+                // paths that aren't tracking an active, non-bootstrap
+                // training suffix at this vertex.
+                SampledSpectrum nrcSuffixLd(0.f);
+                int nrcSuffixSlotForShadowRay = 0;
+#ifdef PBRT_BUILD_NRC
+                if (nrcSuffixTrackThisVertex && !nrcSuffixIsBootstrapVertex) {
+                    nrcSuffixLd = f * AbsDot(wi, ns) * ls->L;
+                    nrcSuffixSlotForShadowRay = int(nrcSuffixSlot);
+                }
+#endif
+
                 shadowRayQueue->Push(ShadowRayWorkItem{ray, 1 - ShadowEpsilon, lambda, Ld,
-                                                       r_u, r_l, w.pixelIndex});
+                                                       r_u, r_l, w.pixelIndex, nrcSuffixLd,
+                                                       nrcSuffixSlotForShadowRay});
 
                 PBRT_DBG("w.index %d spawned shadow ray depth %d Ld %f %f %f %f "
                          "new beta %f %f %f %f beta/uni %f %f %f %f Ld/uni %f %f %f %f\n",
@@ -324,6 +729,7 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                          SafeDiv(Ld, r_u)[1], SafeDiv(Ld, r_u)[2],
                          SafeDiv(Ld, r_u)[3]);
             }
+            }  // !nrcTerminateAndSubstitute
         });
 }
 

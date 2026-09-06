@@ -19,6 +19,14 @@
 
 namespace pbrt {
 
+// Muller et al. 2021 training-suffix cap (see integrator.h for the full
+// design). Declared here, at namespace scope, rather than as a
+// WavefrontPathIntegrator member, so that intersect.h's free function
+// RecordShadowRayResult -- which has no access to that class -- can compute
+// suffix-array offsets for the NEE contribution recorded in
+// ShadowRayWorkItem below.
+constexpr uint32_t kNRCMaxSuffixLen = 4;
+
 // RaySamples Definition
 struct RaySamples {
     // RaySamples Public Members
@@ -169,6 +177,14 @@ struct ShadowRayWorkItem {
     SampledWavelengths lambda;
     SampledSpectrum Ld, r_u, r_l;
     int pixelIndex;
+    // Training-suffix NEE: suffix-parallel (beta=1) equivalent of Ld, added
+    // to nrcSuffixLocal[nrcSuffixSlot] by RecordShadowRayResult if the
+    // shadow ray is unoccluded. Zero (a harmless no-op add) when this
+    // vertex isn't part of an active, non-bootstrap training suffix, or for
+    // shadow rays spawned from medium/subsurface scattering (out of scope
+    // for the suffix mechanism).
+    SampledSpectrum nrcSuffixLd;
+    int nrcSuffixSlot;
 };
 
 // GetBSSRDFAndProbeRayWorkItem Definition
