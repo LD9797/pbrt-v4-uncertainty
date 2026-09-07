@@ -346,11 +346,13 @@ WavefrontPathIntegrator::WavefrontPathIntegrator(
         cudaMemset(nrcInferenceOutputs, 0,
                    sizeof(float) * kNRCOutputDims * nrcBatchSize);
         cudaMallocManaged(&nrcRenderQuery, sizeof(uint8_t) * nrcBatchSize);
+        cudaMallocManaged(&nrcRenderQueryDepth, sizeof(uint8_t) * nrcBatchSize);
         cudaMallocManaged(&nrcSnapshotBeta,
                           sizeof(float) * NSpectrumSamples * nrcBatchSize);
         cudaMallocManaged(&nrcSnapshotL,
                           sizeof(float) * NSpectrumSamples * nrcBatchSize);
         cudaMemset(nrcRenderQuery, 0, sizeof(uint8_t) * nrcBatchSize);
+        cudaMemset(nrcRenderQueryDepth, 0, sizeof(uint8_t) * nrcBatchSize);
         cudaMemset(nrcSnapshotBeta, 0,
                    sizeof(float) * NSpectrumSamples * nrcBatchSize);
         cudaMemset(nrcSnapshotL, 0,
@@ -1216,6 +1218,7 @@ void WavefrontPathIntegrator::NRCResetSampleBuffers() {
     uint8_t *reachedQueryVertex = nrcReachedQueryVertex;
     uint8_t *trainingPath = nrcTrainingPath;
     uint8_t *renderQuery = nrcRenderQuery;
+    uint8_t *renderQueryDepth = nrcRenderQueryDepth;
     float *spreadAccum = nrcPathSpreadAccum;
     float *a0 = nrcPathA0;
     uint8_t *suffixActive = nrcSuffixActive;
@@ -1230,6 +1233,7 @@ void WavefrontPathIntegrator::NRCResetSampleBuffers() {
             reachedQueryVertex[i] = 0;
             trainingPath[i] = 0;
             renderQuery[i] = 0;
+            renderQueryDepth[i] = 0;
             spreadAccum[i] = 0.f;
             a0[i] = 0.f;
             suffixActive[i] = 0;
@@ -1273,6 +1277,40 @@ void LogNRCMagnitudeStats(const char *label, const float *base, size_t count,
     float p999 = mags[std::min(n - 1, size_t(0.999 * n))];
     fprintf(stderr, "NRC %s:\nn=%zu max=%.9g p99=%.9g p99.9=%.9g\n\n", label, n,
             maxVal, p99, p999);
+}
+
+// Diagnostic: histogram of the path depth at which render-query paths
+// terminated and got their continuation replaced by a cache prediction this
+// pass (i.e. every i with renderQuery[i] != 0). Answers "how much of the
+// path tracing is NRC actually replacing?" -- queries concentrated at low
+// depths mean the cache is doing most of the work; queries concentrated at
+// high depths mean pbrt had already done most of the work before NRC steps
+// in, so visual similarity to a full unbiased render is less meaningful.
+void LogNRCQueryDepthHistogram(const uint8_t *renderQuery, const uint8_t *depth,
+                               uint32_t batch) {
+    constexpr int kNumBuckets = 5;  // 0, 1, 2, 3, 4+
+    size_t counts[kNumBuckets] = {0, 0, 0, 0, 0};
+    size_t total = 0;
+    for (uint32_t i = 0; i < batch; ++i) {
+        if (!renderQuery[i])
+            continue;
+        int bucket = std::min(int(depth[i]), kNumBuckets - 1);
+        ++counts[bucket];
+        ++total;
+    }
+    if (total == 0) {
+        fprintf(stderr, "NRC render query depth: n=0\n\n");
+        return;
+    }
+    fprintf(stderr, "NRC render query depth (n=%zu):\n", total);
+    for (int b = 0; b < kNumBuckets; ++b) {
+        double pct = 100.0 * double(counts[b]) / double(total);
+        if (b < kNumBuckets - 1)
+            fprintf(stderr, "  depth %d:  %5.1f%% (%zu)\n", b, pct, counts[b]);
+        else
+            fprintf(stderr, "  depth %d+: %5.1f%% (%zu)\n", b, pct, counts[b]);
+    }
+    fprintf(stderr, "\n");
 }
 
 // Diagnostic: like LogNRCMagnitudeStats, but for the ragged
@@ -1696,6 +1734,9 @@ void WavefrontPathIntegrator::NRCInferenceForRenderPaths() {
             psState->L[i] = Lprev + beta * predicted;
         });
     cudaDeviceSynchronize();
+
+    if (nrcWarmedUp && (nrcSampleCounter & 31) == 0)
+        LogNRCQueryDepthHistogram(nrcRenderQuery, nrcRenderQueryDepth, nrcBatchSize);
 
     if (nrcWarmedUp && (nrcSampleCounter & 31) == 0)
         LogNRCMagnitudeStats("prediction", nrcInferenceOutputs, nrcBatchSize,

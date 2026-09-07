@@ -261,6 +261,11 @@ class WavefrontPathIntegrator {
     //     loop, before UpdateFilm()) and adds beta * predicted radiance into
     //     L, replacing the skipped continuation with Muller et al.'s cache
     //     estimate.
+    //   nrcRenderQueryDepth: 1 byte per slot, w.depth at the vertex where
+    //     nrcRenderQuery was set (0 == query happened at the primary hit).
+    //     Diagnostic-only: LogNRCQueryDepthHistogram() (integrator.cpp) logs
+    //     what fraction of render-query paths terminated at each depth, to
+    //     gauge how much actual path tracing the cache is substituting for.
     //   nrcSnapshotBeta/nrcSnapshotL: NSpectrumSamples floats per slot,
     //     captured the moment a path's query vertex is found (whichever of
     //     the four ways above), regardless of training/render status.
@@ -301,6 +306,7 @@ class WavefrontPathIntegrator {
     float *nrcCompactTargets = nullptr;  // valid-only training targets, compacted each pass
     float *nrcInferenceOutputs = nullptr;  // scratch for per-step inference
     uint8_t *nrcRenderQuery = nullptr;   // 1 = non-training path terminated at its query vertex this pass; needs cache substitution
+    uint8_t *nrcRenderQueryDepth = nullptr;  // w.depth at the render-query vertex, valid wherever nrcRenderQuery == 1; diagnostic-only (query-depth histogram)
     float *nrcSnapshotBeta = nullptr;    // NSpectrumSamples floats/slot: path throughput arriving at the query vertex
     float *nrcSnapshotL = nullptr;       // NSpectrumSamples floats/slot: L accumulated strictly before the query vertex's own shading
     // Persistent per-pixel predicted RGB image (sized to film resolution).

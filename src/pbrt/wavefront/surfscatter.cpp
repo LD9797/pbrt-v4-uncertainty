@@ -228,7 +228,7 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
             // keeps running unaffected, since none of that is gated on
             // nrcTerminateAndSubstitute. Flip back to true to re-enable
             // render-time substitution.
-            constexpr bool kEnableRenderSubstitution = false;
+            constexpr bool kEnableRenderSubstitution = true;
             nrcTerminateAndSubstitute = kEnableRenderSubstitution && nrcWarmedUp &&
                                          nrcCaptureNow && !nrcTrainingPath[w.pixelIndex];
             if (nrcCaptureNow) {
@@ -640,8 +640,10 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                 // Padding, constant 1 (paper pads to 64 for tile alignment).
                 row[47 + NSpectrumSamples] = 1.f;
                 row[48 + NSpectrumSamples] = 1.f;
-                if (nrcTerminateAndSubstitute)
+                if (nrcTerminateAndSubstitute) {
                     nrcRenderQuery[w.pixelIndex] = 1;
+                    nrcRenderQueryDepth[w.pixelIndex] = uint8_t(w.depth);
+                }
             }
 #endif
 
