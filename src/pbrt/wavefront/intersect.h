@@ -30,7 +30,8 @@ inline PBRT_CPU_GPU void EnqueueWorkAfterMiss(RayWorkItem r,
 
 inline PBRT_CPU_GPU void RecordShadowRayResult(const ShadowRayWorkItem w,
                                                SOA<PixelSampleState> *pixelSampleState,
-                                               bool foundIntersection) {
+                                               bool foundIntersection,
+                                               float *nrcSuffixLocal = nullptr) {
     if (foundIntersection) {
         PBRT_DBG("Shadow ray was occluded\n");
         return;
@@ -43,6 +44,20 @@ inline PBRT_CPU_GPU void RecordShadowRayResult(const ShadowRayWorkItem w,
 
     SampledSpectrum Lpixel = pixelSampleState->L[w.pixelIndex];
     pixelSampleState->L[w.pixelIndex] = Lpixel + Ld;
+
+    // Training-suffix NEE: add this vertex's own (beta=1) direct-lighting
+    // contribution into its slot, the same way HandleEmissiveIntersection
+    // does for the BSDF-sampled-hit-a-light case. Both are complementary
+    // MIS estimates of the same vertex's direct-lighting term, so they add;
+    // nrcSuffixLd is exactly zero (a harmless no-op) for shadow rays that
+    // aren't part of an active, non-bootstrap training suffix.
+    if (nrcSuffixLocal != nullptr && w.nrcSuffixLd) {
+        SampledSpectrum suffixLd = w.nrcSuffixLd / (w.r_u + w.r_l).Average();
+        size_t base = (size_t(w.pixelIndex) * kNRCMaxSuffixLen + w.nrcSuffixSlot) *
+                      NSpectrumSamples;
+        for (int c = 0; c < NSpectrumSamples; ++c)
+            nrcSuffixLocal[base + c] += suffixLd[c];
+    }
 }
 
 inline PBRT_CPU_GPU void EnqueueWorkAfterIntersection(
@@ -164,7 +179,8 @@ struct TransmittanceTraceResult {
 template <typename T, typename S>
 inline PBRT_CPU_GPU void TraceTransmittance(ShadowRayWorkItem sr,
                                             SOA<PixelSampleState> *pixelSampleState,
-                                            T trace, S spawnTo) {
+                                            T trace, S spawnTo,
+                                            float *nrcSuffixLocal = nullptr) {
     SampledWavelengths lambda = sr.lambda;
 
     SampledSpectrum Ld = sr.Ld;
@@ -263,13 +279,30 @@ inline PBRT_CPU_GPU void TraceTransmittance(ShadowRayWorkItem sr,
     if (T_ray) {
         // FIXME/reconcile: this takes r_l as input while
         // e.g. VolPathIntegrator::SampleLd() does not...
-        Ld *= T_ray / (sr.r_u * r_u + sr.r_l * r_l).Average();
+        SampledSpectrum weight = T_ray / (sr.r_u * r_u + sr.r_l * r_l).Average();
+        Ld *= weight;
 
         PBRT_DBG("Setting final Ld for shadow ray pixel index %d = as %f %f %f %f\n",
                  sr.pixelIndex, Ld[0], Ld[1], Ld[2], Ld[3]);
 
         SampledSpectrum Lpixel = pixelSampleState->L[sr.pixelIndex];
         pixelSampleState->L[sr.pixelIndex] = Lpixel + Ld;
+
+        // Training-suffix NEE: same treatment as the non-transmittance path
+        // in RecordShadowRayResult() -- start from sr.nrcSuffixLd (the
+        // suffix's own beta=1 direct-lighting sample), not sr.Ld (which
+        // carries the render path's accumulated beta), apply the same
+        // transmittance/visibility weight computed above, and add into
+        // this vertex's slot. nrcSuffixLd is exactly zero (a harmless
+        // no-op) for shadow rays that aren't part of an active,
+        // non-bootstrap training suffix.
+        if (nrcSuffixLocal != nullptr && sr.nrcSuffixLd) {
+            SampledSpectrum suffixLd = sr.nrcSuffixLd * weight;
+            size_t base = (size_t(sr.pixelIndex) * kNRCMaxSuffixLen + sr.nrcSuffixSlot) *
+                          NSpectrumSamples;
+            for (int c = 0; c < NSpectrumSamples; ++c)
+                nrcSuffixLocal[base + c] += suffixLd[c];
+        }
     }
 }
 

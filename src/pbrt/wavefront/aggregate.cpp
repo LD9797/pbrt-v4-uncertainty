@@ -58,17 +58,19 @@ void CPUAggregate::IntersectClosest(int maxRays, const RayQueue *rayQueue,
 }
 
 void CPUAggregate::IntersectShadow(int maxRays, ShadowRayQueue *shadowRayQueue,
-                                   SOA<PixelSampleState> *pixelSampleState) const {
+                                   SOA<PixelSampleState> *pixelSampleState,
+                                   float *nrcSuffixLocal) const {
     // Intersect shadow rays from _shadowRayQueue_ in parallel
     ParallelFor(0, shadowRayQueue->Size(), [=](int index) {
         const ShadowRayWorkItem w = (*shadowRayQueue)[index];
         bool hit = aggregate.IntersectP(w.ray, w.tMax);
-        RecordShadowRayResult(w, pixelSampleState, hit);
+        RecordShadowRayResult(w, pixelSampleState, hit, nrcSuffixLocal);
     });
 }
 
 void CPUAggregate::IntersectShadowTr(int maxRays, ShadowRayQueue *shadowRayQueue,
-                                     SOA<PixelSampleState> *pixelSampleState) const {
+                                     SOA<PixelSampleState> *pixelSampleState,
+                                     float *nrcSuffixLocal) const {
     ParallelFor(0, shadowRayQueue->Size(), [=](int index) {
         const ShadowRayWorkItem w = (*shadowRayQueue)[index];
         pstd::optional<ShapeIntersection> si;
@@ -83,7 +85,7 @@ void CPUAggregate::IntersectShadowTr(int maxRays, ShadowRayQueue *shadowRayQueue
                     return TransmittanceTraceResult{true, si->intr.p(),
                                                     si->intr.material};
             },
-            [&](Point3f p) -> Ray { return si->intr.SpawnRayTo(p); });
+            [&](Point3f p) -> Ray { return si->intr.SpawnRayTo(p); }, nrcSuffixLocal);
     });
 }
 

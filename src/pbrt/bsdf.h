@@ -28,6 +28,8 @@ class BSDF {
     operator bool() const { return (bool)bxdf; }
     PBRT_CPU_GPU
     BxDFFlags Flags() const { return bxdf.Flags(); }
+    PBRT_CPU_GPU
+    Float Roughness() const { return bxdf.Roughness(); }
 
     PBRT_CPU_GPU
     Vector3f RenderToLocal(Vector3f v) const { return shadingFrame.ToLocal(v); }

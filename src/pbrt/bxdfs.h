@@ -77,6 +77,9 @@ class DiffuseBxDF {
         return R ? BxDFFlags::DiffuseReflection : BxDFFlags::Unset;
     }
 
+    PBRT_CPU_GPU
+    Float Roughness() const { return 1.f; }
+
   private:
     SampledSpectrum R;
 };
@@ -158,6 +161,9 @@ class DiffuseTransmissionBxDF {
                 (T ? BxDFFlags::DiffuseTransmission : BxDFFlags::Unset));
     }
 
+    PBRT_CPU_GPU
+    Float Roughness() const { return 1.f; }
+
   private:
     // DiffuseTransmissionBxDF Private Members
     SampledSpectrum R, T;
@@ -198,6 +204,18 @@ class DielectricBxDF {
 
     PBRT_CPU_GPU
     void Regularize() { mfDistrib.Regularize(); }
+
+    PBRT_CPU_GPU
+    Float Roughness() const {
+        return mfDistrib.EffectivelySmooth() ? 0.f : std::min(mfDistrib.AverageAlpha(), 1.f);
+    }
+
+    PBRT_CPU_GPU
+    Float Eta() const { return eta; }
+    PBRT_CPU_GPU
+    TrowbridgeReitzDistribution MFDistrib() const { return mfDistrib; }
+    PBRT_CPU_GPU
+    Float F0() const { Float f = (eta - 1) / (eta + 1); return f * f; }
 
   private:
     // DielectricBxDF Private Members
@@ -271,6 +289,12 @@ class ThinDielectricBxDF {
     BxDFFlags Flags() const {
         return (BxDFFlags::Reflection | BxDFFlags::Transmission | BxDFFlags::Specular);
     }
+
+    PBRT_CPU_GPU
+    Float Roughness() const { return 0.f; }
+
+    PBRT_CPU_GPU
+    Float Eta() const { return eta; }
 
   private:
     Float eta;
@@ -374,6 +398,18 @@ class ConductorBxDF {
     PBRT_CPU_GPU
     void Regularize() { mfDistrib.Regularize(); }
 
+    PBRT_CPU_GPU
+    Float Roughness() const {
+        return mfDistrib.EffectivelySmooth() ? 0.f : std::min(mfDistrib.AverageAlpha(), 1.f);
+    }
+
+    PBRT_CPU_GPU
+    Float Eta() const { return eta.Average(); }
+    PBRT_CPU_GPU
+    TrowbridgeReitzDistribution MFDistrib() const { return mfDistrib; }
+    PBRT_CPU_GPU
+    SampledSpectrum F0() const { return FrComplex(1.f, eta, k); }
+
   private:
     // ConductorBxDF Private Members
     TrowbridgeReitzDistribution mfDistrib;
@@ -472,6 +508,10 @@ class LayeredBxDF {
 
         return flags;
     }
+
+    // Bottom layer dominates the visible roughness for a coated material.
+    PBRT_CPU_GPU
+    Float Roughness() const { return bottom.Roughness(); }
 
     PBRT_CPU_GPU
     SampledSpectrum f(Vector3f wo, Vector3f wi, TransportMode mode) const {
@@ -946,6 +986,9 @@ class HairBxDF {
     BxDFFlags Flags() const { return BxDFFlags::GlossyReflection; }
 
     PBRT_CPU_GPU
+    Float Roughness() const { return beta_m; }
+
+    PBRT_CPU_GPU
     static RGBUnboundedSpectrum SigmaAFromConcentration(Float ce, Float cp);
     PBRT_CPU_GPU
     static SampledSpectrum SigmaAFromReflectance(const SampledSpectrum &c, Float beta_n,
@@ -1052,6 +1095,9 @@ class MeasuredBxDF {
     PBRT_CPU_GPU
     BxDFFlags Flags() const { return (BxDFFlags::Reflection | BxDFFlags::Glossy); }
 
+    PBRT_CPU_GPU
+    Float Roughness() const { return 0.5f; }  // no roughness concept; neutral guess
+
   private:
     // MeasuredBxDF Private Methods
     PBRT_CPU_GPU
@@ -1113,6 +1159,9 @@ class NormalizedFresnelBxDF {
     }
 
     PBRT_CPU_GPU
+    Float Roughness() const { return 1.f; }
+
+    PBRT_CPU_GPU
     SampledSpectrum f(Vector3f wo, Vector3f wi, TransportMode mode) const {
         if (!SameHemisphere(wo, wi))
             return SampledSpectrum(0.f);
@@ -1154,6 +1203,11 @@ PBRT_CPU_GPU inline Float BxDF::PDF(Vector3f wo, Vector3f wi, TransportMode mode
 PBRT_CPU_GPU inline BxDFFlags BxDF::Flags() const {
     auto flags = [&](auto ptr) { return ptr->Flags(); };
     return Dispatch(flags);
+}
+
+PBRT_CPU_GPU inline Float BxDF::Roughness() const {
+    auto rough = [&](auto ptr) { return ptr->Roughness(); };
+    return Dispatch(rough);
 }
 
 PBRT_CPU_GPU inline void BxDF::Regularize() {

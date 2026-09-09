@@ -1737,7 +1737,8 @@ void OptiXAggregate::IntersectClosest(int maxRays, const RayQueue *rayQueue,
 };
 
 void OptiXAggregate::IntersectShadow(int maxRays, ShadowRayQueue *shadowRayQueue,
-                                     SOA<PixelSampleState> *pixelSampleState) const {
+                                     SOA<PixelSampleState> *pixelSampleState,
+                                     float *nrcSuffixLocal) const {
     std::pair<cudaEvent_t, cudaEvent_t> events = GetProfilerEvents("Trace shadow rays");
 
     cudaEventRecord(events.first);
@@ -1747,6 +1748,7 @@ void OptiXAggregate::IntersectShadow(int maxRays, ShadowRayQueue *shadowRayQueue
         params.traversable = rootTraversable;
         params.shadowRayQueue = shadowRayQueue;
         params.pixelSampleState = *pixelSampleState;
+        params.nrcSuffixLocal = nrcSuffixLocal;
 
         ParamBufferState &pbs = getParamBuffer(params);
 
@@ -1775,7 +1777,8 @@ void OptiXAggregate::IntersectShadow(int maxRays, ShadowRayQueue *shadowRayQueue
 }
 
 void OptiXAggregate::IntersectShadowTr(int maxRays, ShadowRayQueue *shadowRayQueue,
-                                       SOA<PixelSampleState> *pixelSampleState) const {
+                                       SOA<PixelSampleState> *pixelSampleState,
+                                       float *nrcSuffixLocal) const {
     std::pair<cudaEvent_t, cudaEvent_t> events =
         GetProfilerEvents("Tracing shadow Tr rays");
 
@@ -1786,6 +1789,7 @@ void OptiXAggregate::IntersectShadowTr(int maxRays, ShadowRayQueue *shadowRayQue
         params.traversable = rootTraversable;
         params.shadowRayQueue = shadowRayQueue;
         params.pixelSampleState = *pixelSampleState;
+        params.nrcSuffixLocal = nrcSuffixLocal;
 
         ParamBufferState &pbs = getParamBuffer(params);
 
