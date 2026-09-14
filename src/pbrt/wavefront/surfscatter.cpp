@@ -614,7 +614,13 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                     // bucketed as "diffuse" for lack of a better split.
                     alpha = bsdf.rho(wo, ucRho, uRho);
                 }
-                SampledSpectrum albedo = alpha + beta;
+                // Combined reflectance used ONLY to factor the network's
+                // prediction as Ls/R (Muller et al. 2021 Sec. 4.1). Kept
+                // distinct from alpha/beta below, which are fed to the
+                // network as separate input features -- feeding the network
+                // alpha+beta instead of alpha alone would leak beta into the
+                // "diffuse" input slot.
+                SampledSpectrum reflectanceFactor = alpha + beta;
 
                 Point3f p(w.pi);
                 float *row =
@@ -633,7 +639,7 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                                nrcSuffixSlot) * NSpectrumSamples
                         : nrcReflectance + size_t(w.pixelIndex) * NSpectrumSamples;
                 for (int c = 0; c < NSpectrumSamples; ++c)
-                    reflectanceRow[c] = Clamp(albedo[c], 0.f, 1.f);
+                    reflectanceRow[c] = Clamp(reflectanceFactor[c], 0.f, 1.f);
                 // dims 0-35: position, normalized to [0,1] via scene bounds, then encoded
                 // with 12 sin-only frequency bands per axis (Muller et al. 2021 explicitly
                 // omit the cosine half used by NeRF-style encodings). Fed to tcnn as raw
@@ -654,30 +660,28 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                 row[39] = (std::atan2(ns.y, ns.x) + Pi) * Inv2Pi;
                 // dim 40: roughness, transformed 1-exp(-r) per Muller et al. -> OneBlob(4)
                 row[40] = 1.f - std::exp(-bsdf.Roughness());
-                // dims 41-43: diffuse albedo (hemispherical reflectance -> sensor RGB), raw.
+                // dims 41-43: diffuse reflectance alpha (-> sensor RGB), raw. Muller
+                // et al. feed alpha and beta to the network as SEPARATE input features
+                // (Sec. 4.1); alpha alone goes here, NOT alpha+beta.
                 // film.ToOutputRGB() runs a Monte Carlo spectral-to-RGB estimator meant
                 // for radiance (it divides by lambda.PDF(), see PixelSensor::ToSensorRGB/
                 // SampledSpectrum::ToXYZ), so single-sample noise can push it wildly
                 // outside [0,1] even though it's actually a reflectance here. Clamping
                 // to [0,1] is a stopgap until material features get a proper stable
                 // (non-stochastic) RGB reflectance conversion.
-                RGB albedoRGB = film.ToOutputRGB(albedo, lambda);
-                row[41] = Clamp(float(albedoRGB.r), 0.f, 1.f);
-                row[42] = Clamp(float(albedoRGB.g), 0.f, 1.f);
-                row[43] = Clamp(float(albedoRGB.b), 0.f, 1.f);
-                // dims 44-46: specular reflectance F0 (Fresnel at normal incidence), raw.
-                // 0 for types with no specular-lobe concept (diffuse, hair, measured, etc.).
-                // Same clamping rationale as albedo above.
-                RGB f0RGB(0.f, 0.f, 0.f);
-                if constexpr (std::is_same_v<ConcreteBxDF, DielectricBxDF>) {
-                    Float f0 = bxdf.F0();
-                    f0RGB = RGB(f0, f0, f0);
-                } else if constexpr (std::is_same_v<ConcreteBxDF, ConductorBxDF>) {
-                    f0RGB = film.ToOutputRGB(bxdf.F0(), lambda);
-                }
-                row[44] = Clamp(f0RGB.r, 0.f, 1.f);
-                row[45] = Clamp(f0RGB.g, 0.f, 1.f);
-                row[46] = Clamp(f0RGB.b, 0.f, 1.f);
+                RGB alphaRGB = film.ToOutputRGB(alpha, lambda);
+                row[41] = Clamp(float(alphaRGB.r), 0.f, 1.f);
+                row[42] = Clamp(float(alphaRGB.g), 0.f, 1.f);
+                row[43] = Clamp(float(alphaRGB.b), 0.f, 1.f);
+                // dims 44-46: specular reflectance beta (-> sensor RGB), raw. Reuses
+                // the same beta computed above for reflectanceFactor, so this is
+                // guaranteed consistent with it. 0 for types with no specular-lobe
+                // concept (diffuse, hair, measured, etc.). Same clamping rationale
+                // as alpha above.
+                RGB betaRGB = film.ToOutputRGB(beta, lambda);
+                row[44] = Clamp(float(betaRGB.r), 0.f, 1.f);
+                row[45] = Clamp(float(betaRGB.g), 0.f, 1.f);
+                row[46] = Clamp(float(betaRGB.b), 0.f, 1.f);
                 // dims 47-(47+NSpectrumSamples-1): this path's sampled
                 // wavelengths, normalized to [0,1] via [Lambda_min,
                 // Lambda_max] -> Identity. Needed so the network's spectral
