@@ -290,7 +290,8 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
             // contribution to the rendered image must keep tracing normally
             // no matter where its suffix ends.
             uint32_t nrcSuffixSlot = 0;
-            bool nrcSuffixTrackThisVertex = nrcSuffixActive[w.pixelIndex];
+            bool nrcSuffixTrackThisVertex =
+                nrcInputs != nullptr && nrcSuffixActive[w.pixelIndex];
             bool nrcSuffixIsBootstrapVertex = false;
             if (nrcSuffixTrackThisVertex) {
                 nrcSuffixSlot = nrcSuffixLen[w.pixelIndex];

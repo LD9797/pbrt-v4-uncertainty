@@ -806,7 +806,7 @@ void WavefrontPathIntegrator::HandleEscapedRays() {
                     // (must NOT be scaled by any accumulated throughput; the
                     // backward recursion in NRCTrainingSuffixFinish() owns
                     // all of that).
-                    if (nrcSuffixActive[w.pixelIndex]) {
+                    if (nrcSuffixActive != nullptr && nrcSuffixActive[w.pixelIndex]) {
                         SampledSpectrum Llocal(0.f);
                         if (w.depth == 0 || w.specularBounce) {
                             Llocal = Le / w.r_u.Average();
@@ -836,7 +836,7 @@ void WavefrontPathIntegrator::HandleEscapedRays() {
             // before this ray was even traced); only nrcSuffixActive needs
             // clearing here, purely for state hygiene (nothing reads it
             // again for this pixel this pass regardless).
-            if (nrcSuffixActive[w.pixelIndex])
+            if (nrcSuffixActive != nullptr && nrcSuffixActive[w.pixelIndex])
                 nrcSuffixActive[w.pixelIndex] = 0;
 #endif
 
@@ -899,7 +899,7 @@ void WavefrontPathIntegrator::HandleEmissiveIntersection() {
             // currently occupies (nrcSuffixLen hasn't advanced for this
             // vertex yet -- that happens in surfscatter.cpp, which runs
             // after this kernel for the same wavefront depth).
-            if (nrcSuffixActive[w.pixelIndex]) {
+            if (nrcSuffixActive != nullptr && nrcSuffixActive[w.pixelIndex]) {
                 SampledSpectrum Llocal(0.f);
                 if (w.depth == 0 || w.specularBounce) {
                     Llocal = Le / w.r_u.Average();
