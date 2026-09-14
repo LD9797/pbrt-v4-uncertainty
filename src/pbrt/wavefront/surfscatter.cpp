@@ -578,7 +578,43 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                     Point2f(0.429467, 0.454469), Point2f(0.244460, 0.816459),
                     Point2f(0.756135, 0.731258), Point2f(0.516165, 0.152852),
                     Point2f(0.180888, 0.214174), Point2f(0.898579, 0.503897)};
-                SampledSpectrum albedo = bsdf.rho(wo, ucRho, uRho);
+                // Reflectance decomposition R = alpha + beta (Muller et al.
+                // 2021 Sec. 4.1): alpha is the diffuse reflectance and beta
+                // is the specular reflectance, both evaluated spectrally at
+                // this path's sampled wavelengths. Computed explicitly per
+                // BxDF type -- rather than from bsdf.rho()'s single combined
+                // stochastic estimate -- so the diffuse/specular split used
+                // to factor Ls is well defined and (where a closed form
+                // exists) noise-free.
+                SampledSpectrum alpha(0.f), beta(0.f);
+                if constexpr (std::is_same_v<ConcreteBxDF, DiffuseBxDF>) {
+                    // Lambertian: f = R * InvPi over the whole hemisphere, so
+                    // the hemispherical-directional reflectance is exactly R
+                    // -- no specular term.
+                    alpha = bxdf.GetR();
+                } else if constexpr (std::is_same_v<ConcreteBxDF, DielectricBxDF>) {
+                    // Smooth/rough dielectric interface: purely specular
+                    // reflection (plus transmission, which isn't
+                    // "reflectance" and is excluded). Use the normal-incidence
+                    // Fresnel reflectance as a stable, spectrally-flat
+                    // estimate of the specular term -- pbrt's DielectricBxDF
+                    // uses a single non-spectral eta, so there's no spectral
+                    // variation to capture here anyway.
+                    beta = SampledSpectrum(bxdf.F0());
+                } else if constexpr (std::is_same_v<ConcreteBxDF, ConductorBxDF>) {
+                    // Purely specular/glossy reflection off a conductor: no
+                    // diffuse term. F0() is the normal-incidence complex
+                    // Fresnel reflectance, spectral via eta/k.
+                    beta = bxdf.F0();
+                } else {
+                    // No explicit decomposition yet for this BxDF type
+                    // (diffuse transmission, thin dielectric, layered/coated,
+                    // hair, measured, ...): fall back to the combined
+                    // hemispherical-directional reflectance, as before,
+                    // bucketed as "diffuse" for lack of a better split.
+                    alpha = bsdf.rho(wo, ucRho, uRho);
+                }
+                SampledSpectrum albedo = alpha + beta;
 
                 Point3f p(w.pi);
                 float *row =

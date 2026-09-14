@@ -80,6 +80,13 @@ class DiffuseBxDF {
     PBRT_CPU_GPU
     Float Roughness() const { return 1.f; }
 
+    // Lambertian reflectance R: for this BxDF, f = R * InvPi over the whole
+    // hemisphere, so R is exactly the hemispherical-directional reflectance
+    // (no need to Monte Carlo estimate it via rho()). Exposed for NRC's
+    // diffuse/specular reflectance decomposition (Muller et al. 2021 Sec. 4.1).
+    PBRT_CPU_GPU
+    SampledSpectrum GetR() const { return R; }
+
   private:
     SampledSpectrum R;
 };
