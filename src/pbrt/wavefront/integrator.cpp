@@ -1474,8 +1474,12 @@ void WavefrontPathIntegrator::NRCTrainAndInferStep() {
             float *dst = nrcCompactTargets + nValid * kNRCOutputDims;
             const float *src =
                 nrcSuffixTarget + (size_t(i) * kNRCMaxSuffixLen + s) * kNRCOutputDims;
-            for (uint32_t c = 0; c < kNRCOutputDims; ++c)
-                dst[c] = std::max(0.f, src[c]);
+            const float *reflectance =
+                nrcSuffixReflectance + (size_t(i) * kNRCMaxSuffixLen + s) * NSpectrumSamples;
+            for (uint32_t c = 0; c < kNRCOutputDims; ++c) {
+                float r = std::max(reflectance[c], 1e-3f);
+                dst[c] = std::max(0.f, src[c]) / r;
+            }
             ++nValid;
         }
     }
