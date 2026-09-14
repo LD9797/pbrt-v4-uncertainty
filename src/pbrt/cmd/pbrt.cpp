@@ -65,6 +65,7 @@ Rendering options:
                                 (Default: built-in 64-wide 3-layer MLP)
   --nrc-output <path>           Save path for the NRC predicted image. (Default: nrc_predicted.exr)
   --enable-nrc                  Enable the Neural Radiance Cache side-computation. (Default: disabled)
+  --nrc-debug                   Enable verbose per-pass NRC diagnostic logging to stderr. (Default: disabled)
   --nthreads <num>              Use specified number of threads for rendering.
   --outfile <filename>          Write the final image to the given filename.
   --pixel <x,y>                 Render just the specified pixel.
@@ -198,6 +199,7 @@ int main(int argc, char *argv[]) {
             ParseArg(&iter, args.end(), "nrc-config", &options.nrcConfigFile, onError) ||
             ParseArg(&iter, args.end(), "nrc-output", &options.nrcOutputFile, onError) ||
             ParseArg(&iter, args.end(), "enable-nrc", &options.enableNRC, onError) ||
+            ParseArg(&iter, args.end(), "nrc-debug", &options.nrcDebug, onError) ||
             ParseArg(&iter, args.end(), "nthreads", &options.nThreads, onError) ||
             ParseArg(&iter, args.end(), "outfile", &options.imageFile, onError) ||
             ParseArg(&iter, args.end(), "pixelstats", &options.recordPixelStatistics,

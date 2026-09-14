@@ -59,6 +59,7 @@ struct PBRTOptions : BasicPBRTOptions {
     std::string nrcConfigFile;         // --nrc-config: path to tcnn JSON config (empty = built-in default)
     std::string nrcOutputFile = "nrc_predicted.exr"; // --nrc-output: save path for the NRC predicted image
     bool enableNRC = false;            // --enable-nrc: opt-in to the Neural Radiance Cache side-computation
+    bool nrcDebug = false;              // --nrc-debug: enable verbose per-pass NRC diagnostic logging to stderr
 
     std::string ToString() const;
 };

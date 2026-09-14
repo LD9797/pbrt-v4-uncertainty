@@ -613,7 +613,7 @@ Float WavefrontPathIntegrator::Render() {
                 // Bootstrap-query and backward-propagate this pass's
                 // training suffixes into per-vertex records before
                 // compacting/training on them.
-                if (nrcCache && (nrcSampleCounter & 31) == 0) {
+                if (nrcCache && Options->nrcDebug && (nrcSampleCounter & 31) == 0) {
                     fprintf(stderr, "NRC suffix NEE generated:\ncount=%llu max=%.9g\n\n",
                             (unsigned long long)nrcSuffixNEEGenCount, nrcSuffixNEEGenMax);
                     fprintf(stderr, "NRC suffix NEE visible:\ncount=%llu max=%.9g\n\n",
@@ -623,12 +623,13 @@ Float WavefrontPathIntegrator::Render() {
                                        nrcBatchSize, kNRCMaxSuffixLen,
                                        (int)NSpectrumSamples);
                 }
-                // Temporary: narrow window around where warmup ends (sample
-                // 16 by default) to catch the exact pass where an
-                // untrained bootstrap prediction first starts blowing up
-                // suffix targets -- the usual 1-in-32 gate above would
-                // skip right over it.
-                if (nrcCache && nrcSampleCounter >= 14 && nrcSampleCounter <= 22) {
+                // Narrow window around where warmup ends (sample 16 by
+                // default), useful for catching an untrained bootstrap
+                // prediction blowing up suffix targets -- the usual
+                // 1-in-32 gate above would skip right over it. Only runs
+                // with --nrc-debug.
+                if (nrcCache && Options->nrcDebug && nrcSampleCounter >= 14 &&
+                    nrcSampleCounter <= 22) {
                     cudaDeviceSynchronize();
                     LogSuffixStepStats("nrcSuffixStep", nrcSuffixStep, nrcSuffixLen,
                                       nrcBatchSize, kNRCMaxSuffixLen,
@@ -929,7 +930,7 @@ void WavefrontPathIntegrator::HandleEmissiveIntersection() {
 void WavefrontPathIntegrator::TraceShadowRays(int wavefrontDepth) {
 #ifdef PBRT_BUILD_NRC
     float *suffixLocal = nrcSuffixLocal;
-    bool logNEEStats = nrcCache && (nrcSampleCounter & 31) == 0;
+    bool logNEEStats = nrcCache && Options->nrcDebug && (nrcSampleCounter & 31) == 0;
     int nRays = 0;
     if (logNEEStats) {
         cudaDeviceSynchronize();
@@ -1471,7 +1472,7 @@ void WavefrontPathIntegrator::NRCTrainAndInferStep() {
         }
     }
 
-    if (nValid > 0) {
+    if (nValid > 0 && Options->nrcDebug) {
         LogFiniteStats("TRAIN INPUT", nrcCompactInputs, size_t(nValid) * kNRCInputDims);
         LogFiniteStats("TRAIN TARGET", nrcCompactTargets, size_t(nValid) * kNRCOutputDims);
 
@@ -1505,25 +1506,32 @@ void WavefrontPathIntegrator::NRCTrainAndInferStep() {
         }
         for (int step = 0; step < kNRCTrainSteps; ++step) {
             nrcLastLoss = nrcCache->TrainN(nrcCompactInputs, nrcCompactTargets, trainBatch);
-            fprintf(stderr,
-                    "NRC TRAIN: sample=%d step=%d/%d nValid=%u trainBatch=%u loss=%.9g "
-                    "finite=%d\n",
-                    nrcSampleCounter, step + 1, kNRCTrainSteps, nValid, trainBatch,
-                    nrcLastLoss, std::isfinite(nrcLastLoss) ? 1 : 0);
+            if (Options->nrcDebug)
+                fprintf(stderr,
+                        "NRC TRAIN: sample=%d step=%d/%d nValid=%u trainBatch=%u loss=%.9g "
+                        "finite=%d\n",
+                        nrcSampleCounter, step + 1, kNRCTrainSteps, nValid, trainBatch,
+                        nrcLastLoss, std::isfinite(nrcLastLoss) ? 1 : 0);
         }
 
-        cudaDeviceSynchronize();
-        nrcCache->Inference(nrcSuffixBootstrapInputs, nrcInferenceOutputs);
-        cudaDeviceSynchronize();
-        LogFiniteStats("OUTPUT AFTER TRAIN", nrcInferenceOutputs,
-                       size_t(nrcBatchSize) * kNRCOutputDims);
+        // The post-train inference call below exists purely to feed the
+        // "OUTPUT AFTER TRAIN" diagnostic -- skip both entirely when not
+        // debugging, since it's a full extra network inference pass over
+        // the batch that the render itself never uses.
+        if (Options->nrcDebug) {
+            cudaDeviceSynchronize();
+            nrcCache->Inference(nrcSuffixBootstrapInputs, nrcInferenceOutputs);
+            cudaDeviceSynchronize();
+            LogFiniteStats("OUTPUT AFTER TRAIN", nrcInferenceOutputs,
+                           size_t(nrcBatchSize) * kNRCOutputDims);
+        }
     }
 
     ++nrcSampleCounter;
     nrcWarmedUp = nrcSampleCounter >= Options->nrcWarmupSamples;
     if ((nrcSampleCounter & 31) == 0) {
         LOG_VERBOSE("NRC: step %d loss %f", nrcSampleCounter, nrcLastLoss);
-        if (nValid > 0)
+        if (nValid > 0 && Options->nrcDebug)
             LogNRCMagnitudeStats("target", nrcCompactTargets, nValid, (int)kNRCOutputDims);
     }
 }
@@ -1567,8 +1575,9 @@ void WavefrontPathIntegrator::NRCTrainingSuffixFinish() {
     // already consumed its previous contents earlier this pass.
     nrcCache->Inference(nrcSuffixBootstrapInputs, nrcInferenceOutputs);
     cudaDeviceSynchronize();
-    LogFiniteStats("OUTPUT BEFORE TRAIN", nrcInferenceOutputs,
-                   size_t(nrcBatchSize) * kNRCOutputDims);
+    if (Options->nrcDebug)
+        LogFiniteStats("OUTPUT BEFORE TRAIN", nrcInferenceOutputs,
+                       size_t(nrcBatchSize) * kNRCOutputDims);
 
     // Walk each training suffix backward from its last finalized vertex to
     // the render-query vertex (slot 0), seeding the recursion with the
@@ -1629,13 +1638,14 @@ void WavefrontPathIntegrator::NRCTrainingSuffixFinish() {
     }
     cudaDeviceSynchronize();
 
-    // Temporary: find the single suffix record with the largest target
-    // magnitude produced by the recursion above, and print its full
-    // backward-recursion trace (local, step, Lnext, result at every slot,
-    // all raw spectral channels now -- no RGB conversion involved). Gated
-    // to a narrow sample window and a magnitude threshold so it only fires
-    // on rare catastrophic samples.
-    if (nrcSampleCounter <= 20) {
+    // Find the single suffix record with the largest target magnitude
+    // produced by the recursion above, and print its full backward-
+    // recursion trace (local, step, Lnext, result at every slot, all raw
+    // spectral channels). Gated to a narrow sample window and a magnitude
+    // threshold so it only fires on rare catastrophic samples, and only
+    // runs at all with --nrc-debug (it's an O(batch * suffix cap) host
+    // scan every pass in that window).
+    if (Options->nrcDebug && nrcSampleCounter <= 20) {
         bool found = false;
         uint32_t maxI = 0;
         int maxS = -1;
@@ -1735,10 +1745,10 @@ void WavefrontPathIntegrator::NRCInferenceForRenderPaths() {
         });
     cudaDeviceSynchronize();
 
-    if (nrcWarmedUp && (nrcSampleCounter & 31) == 0)
+    if (Options->nrcDebug && nrcWarmedUp && (nrcSampleCounter & 31) == 0)
         LogNRCQueryDepthHistogram(nrcRenderQuery, nrcRenderQueryDepth, nrcBatchSize);
 
-    if (nrcWarmedUp && (nrcSampleCounter & 31) == 0)
+    if (Options->nrcDebug && nrcWarmedUp && (nrcSampleCounter & 31) == 0)
         LogNRCMagnitudeStats("prediction", nrcInferenceOutputs, nrcBatchSize,
                              (int)kNRCOutputDims, nrcRenderQuery);
 }
