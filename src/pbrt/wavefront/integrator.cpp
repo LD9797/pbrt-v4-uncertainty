@@ -1753,7 +1753,7 @@ void WavefrontPathIntegrator::NRCInferenceForRenderPaths() {
             for (int c = 0; c < NSpectrumSamples; ++c) {
                 float networkValue =
                     std::max(0.f, outputs[i * (int)kNRCOutputDims + c]);
-                float r = reflectance[i * NSpectrumSamples + c];
+                float r = std::max(reflectance[i * NSpectrumSamples + c], 1e-3f);
                 predicted[c] = networkValue * r;
             }
             SampledSpectrum beta;
