@@ -1730,24 +1730,32 @@ void WavefrontPathIntegrator::NRCInferenceForRenderPaths() {
     const uint8_t *renderQuery = nrcRenderQuery;
     const float *outputs = nrcInferenceOutputs;
     const float *snapshotBeta = nrcSnapshotBeta;
+    const float *reflectance = nrcReflectance;
     auto *psState = &pixelSampleState;
     const uint32_t batch = nrcBatchSize;
     ParallelFor(
         "NRC render substitution", batch, PBRT_CPU_GPU_LAMBDA(int i) {
             if (!renderQuery[i])
                 return;
-            // The network predicts raw spectral radiance leaving the query
-            // vertex, at this path's own sampled wavelengths (see the input
-            // row's wavelength dims in surfscatter.cpp) -- independent of
-            // any particular path's history, exactly like the suffix
-            // training targets it's trained on. To turn that into this
-            // path's actual contribution, it must be weighted by the real
-            // prefix throughput that got this path to the query vertex
-            // (nrcSnapshotBeta, captured at that vertex in surfscatter.cpp),
-            // the same way a real continuation ray's radiance would be.
+            // The network predicts factored radiance (Ls / reflectance) at
+            // the query vertex, at this path's own sampled wavelengths (see
+            // the input row's wavelength dims in surfscatter.cpp) --
+            // independent of any particular path's history, exactly like
+            // the suffix training targets it's trained on (see
+            // NRCTrainAndInferStep()'s reflectance-factored compaction).
+            // Multiplying back by the same spectral reflectance recovers
+            // the predicted scattered radiance; that must then be weighted
+            // by the real prefix throughput that got this path to the query
+            // vertex (nrcSnapshotBeta, captured at that vertex in
+            // surfscatter.cpp), the same way a real continuation ray's
+            // radiance would be.
             SampledSpectrum predicted;
-            for (int c = 0; c < NSpectrumSamples; ++c)
-                predicted[c] = std::max(0.f, outputs[i * (int)kNRCOutputDims + c]);
+            for (int c = 0; c < NSpectrumSamples; ++c) {
+                float networkValue =
+                    std::max(0.f, outputs[i * (int)kNRCOutputDims + c]);
+                float r = reflectance[i * NSpectrumSamples + c];
+                predicted[c] = networkValue * r;
+            }
             SampledSpectrum beta;
             for (int c = 0; c < NSpectrumSamples; ++c)
                 beta[c] = snapshotBeta[i * NSpectrumSamples + c];
