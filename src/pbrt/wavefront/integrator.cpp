@@ -357,6 +357,10 @@ WavefrontPathIntegrator::WavefrontPathIntegrator(
                    sizeof(float) * NSpectrumSamples * nrcBatchSize);
         cudaMemset(nrcSnapshotL, 0,
                    sizeof(float) * NSpectrumSamples * nrcBatchSize);
+        cudaMallocManaged(&nrcReflectance,
+                          sizeof(float) * NSpectrumSamples * nrcBatchSize);
+        cudaMemset(nrcReflectance, 0,
+                   sizeof(float) * NSpectrumSamples * nrcBatchSize);
 
         // Training-suffix buffers (see integrator.h for the full design
         // rationale). nrcSuffixInputs/Local/Step/Target are all sized
@@ -383,6 +387,8 @@ WavefrontPathIntegrator::WavefrontPathIntegrator(
                                                 kNRCMaxSuffixLen * nrcBatchSize);
         cudaMallocManaged(&nrcSuffixBootstrapInputs,
                           sizeof(float) * kNRCInputDims * nrcBatchSize);
+        cudaMallocManaged(&nrcSuffixReflectance, sizeof(float) * NSpectrumSamples *
+                                                     kNRCMaxSuffixLen * nrcBatchSize);
         cudaMemset(nrcSuffixActive, 0, sizeof(uint8_t) * nrcBatchSize);
         cudaMemset(nrcSuffixLen, 0, sizeof(uint8_t) * nrcBatchSize);
         cudaMemset(nrcSuffixTerminatedByHeuristic, 0,
@@ -402,6 +408,8 @@ WavefrontPathIntegrator::WavefrontPathIntegrator(
                    sizeof(float) * kNRCOutputDims * kNRCMaxSuffixLen * nrcBatchSize);
         cudaMemset(nrcSuffixBootstrapInputs, 0,
                    sizeof(float) * kNRCInputDims * nrcBatchSize);
+        cudaMemset(nrcSuffixReflectance, 0,
+                   sizeof(float) * NSpectrumSamples * kNRCMaxSuffixLen * nrcBatchSize);
 
         nrcCache = new nrc::NeuralRadianceCache(nrcBatchSize, kNRCInputDims,
                                                 kNRCOutputDims,

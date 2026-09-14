@@ -309,6 +309,17 @@ class WavefrontPathIntegrator {
     uint8_t *nrcRenderQueryDepth = nullptr;  // w.depth at the render-query vertex, valid wherever nrcRenderQuery == 1; diagnostic-only (query-depth histogram)
     float *nrcSnapshotBeta = nullptr;    // NSpectrumSamples floats/slot: path throughput arriving at the query vertex
     float *nrcSnapshotL = nullptr;       // NSpectrumSamples floats/slot: L accumulated strictly before the query vertex's own shading
+    // Spectral hemispherical-directional reflectance (bsdf.rho()) at the
+    // vertex whose input row was just written, NSpectrumSamples floats per
+    // slot, clamped to [0,1]. Used to factor the network's prediction as
+    // Ls/reflectance rather than raw Ls (Muller et al. 2021's "reflectance
+    // factorization", Sec. 4.1), which improves color reproduction and
+    // glossy highlight detail. nrcReflectance mirrors nrcInputs (one slot
+    // per render-query path, indexed by pixelIndex); nrcSuffixReflectance
+    // mirrors nrcSuffixInputs (one slot per training-suffix vertex, indexed
+    // by pixelIndex * kNRCMaxSuffixLen + suffix slot).
+    float *nrcReflectance = nullptr;
+    float *nrcSuffixReflectance = nullptr;
     // Persistent per-pixel predicted RGB image (sized to film resolution).
     // Populated by per-sample inference passes; written to EXR at end of Render().
     float *nrcPredictedRGB = nullptr;

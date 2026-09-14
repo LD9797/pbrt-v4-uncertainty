@@ -586,6 +586,18 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                         ? nrcSuffixInputs + (size_t(w.pixelIndex) * kNRCMaxSuffixLen +
                                             nrcSuffixSlot) * kNRCInputDims
                         : nrcInputs + size_t(w.pixelIndex) * kNRCInputDims;
+                // Spectral hemispherical-directional reflectance at this
+                // vertex, stored alongside the input row for later use
+                // factoring the network's prediction as Ls/reflectance
+                // (Muller et al. 2021 Sec. 4.1) -- see integrator.h.
+                float *reflectanceRow =
+                    nrcSuffixTrackThisVertex
+                        ? nrcSuffixReflectance +
+                              (size_t(w.pixelIndex) * kNRCMaxSuffixLen +
+                               nrcSuffixSlot) * NSpectrumSamples
+                        : nrcReflectance + size_t(w.pixelIndex) * NSpectrumSamples;
+                for (int c = 0; c < NSpectrumSamples; ++c)
+                    reflectanceRow[c] = Clamp(albedo[c], 0.f, 1.f);
                 // dims 0-35: position, normalized to [0,1] via scene bounds, then encoded
                 // with 12 sin-only frequency bands per axis (Muller et al. 2021 explicitly
                 // omit the cosine half used by NeRF-style encodings). Fed to tcnn as raw
