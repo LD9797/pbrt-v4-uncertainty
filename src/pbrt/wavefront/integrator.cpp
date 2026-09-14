@@ -1610,6 +1610,7 @@ void WavefrontPathIntegrator::NRCTrainingSuffixFinish() {
         const float *step = nrcSuffixStep;
         float *target = nrcSuffixTarget;
         const float *bootstrapOutputs = nrcInferenceOutputs;
+        const float *reflectance = nrcSuffixReflectance;
         const uint32_t cap = kNRCMaxSuffixLen;
         const uint32_t batch = nrcBatchSize;
         const bool warmedUp = nrcWarmedUp;
@@ -1630,9 +1631,13 @@ void WavefrontPathIntegrator::NRCTrainingSuffixFinish() {
                 // continuation (equivalent to a natural end), same as if
                 // no bootstrap query had been made at all.
                 if (terminatedByHeuristic[i] && warmedUp) {
-                    for (int c = 0; c < NSpectrumSamples; ++c)
-                        Lnext[c] =
-                            std::max(0.f, bootstrapOutputs[i * (int)kNRCOutputDims + c]);
+                    for (int c = 0; c < NSpectrumSamples; ++c) {
+                        float refl = std::max(
+                            reflectance[(size_t(i) * cap + m) * NSpectrumSamples + c],
+                            1e-3f);
+                        Lnext[c] = refl * std::max(
+                            0.f, bootstrapOutputs[i * (int)kNRCOutputDims + c]);
+                    }
                 }
                 for (int s = int(m) - 1; s >= 0; --s) {
                     SampledSpectrum localS, stepS;
@@ -1688,9 +1693,14 @@ void WavefrontPathIntegrator::NRCTrainingSuffixFinish() {
                     maxAbs);
             SampledSpectrum Lnext(0.f);
             if (nrcSuffixTerminatedByHeuristic[i] && nrcWarmedUp) {
-                for (int c = 0; c < NSpectrumSamples; ++c)
-                    Lnext[c] = std::max(
+                for (int c = 0; c < NSpectrumSamples; ++c) {
+                    float refl = std::max(
+                        nrcSuffixReflectance[(size_t(i) * kNRCMaxSuffixLen + m) *
+                                                 NSpectrumSamples + c],
+                        1e-3f);
+                    Lnext[c] = refl * std::max(
                         0.f, nrcInferenceOutputs[i * (int)kNRCOutputDims + c]);
+                }
             }
             for (int s = int(m) - 1; s >= 0; --s) {
                 SampledSpectrum localS, stepS;
