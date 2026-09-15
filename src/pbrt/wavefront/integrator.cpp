@@ -341,10 +341,10 @@ WavefrontPathIntegrator::WavefrontPathIntegrator(
                           sizeof(float) * kNRCInputDims * nrcCompactCapacity);
         cudaMallocManaged(&nrcCompactTargets,
                           sizeof(float) * kNRCOutputDims * nrcCompactCapacity);
-        cudaMallocManaged(&nrcCompactChannelWeights,
-                          sizeof(float) * kNRCOutputDims * nrcCompactCapacity);
-        cudaMemset(nrcCompactChannelWeights, 0,
-                   sizeof(float) * kNRCOutputDims * nrcCompactCapacity);
+        cudaMallocManaged(&nrcCompactAux,
+                          sizeof(float) * 2 * kNRCOutputDims * nrcCompactCapacity);
+        cudaMemset(nrcCompactAux, 0,
+                   sizeof(float) * 2 * kNRCOutputDims * nrcCompactCapacity);
         cudaMallocManaged(&nrcInferenceOutputs,
                           sizeof(float) * kNRCOutputDims * nrcBatchSize);
         cudaMemset(nrcInferenceOutputs, 0,
@@ -1472,6 +1472,13 @@ void WavefrontPathIntegrator::NRCTrainAndInferStep() {
         const float *src = nrcTargets   + i      * kNRCOutputDims;
         for (uint32_t c = 0; c < kNRCOutputDims; ++c)
             dst[c] = std::max(0.f, src[c]); //dst[c] = std::log1p(std::max(0.f, src[c]));  // clamp: ToOutputRGB can return negative for out-of-gamut spectra
+        float *dstAux = nrcCompactAux + nValid * (2 * kNRCOutputDims);
+        const float *rSrc = nrcReflectance + size_t(i) * NSpectrumSamples;
+        const float *wSrc = nrcChannelWeight + size_t(i) * NSpectrumSamples;
+        for (uint32_t c = 0; c < kNRCOutputDims; ++c) {
+            dstAux[c] = rSrc[c];
+            dstAux[kNRCOutputDims + c] = wSrc[c];
+        }
         ++nValid;
     }
     // Training-suffix records: each training path can contribute up to
@@ -1486,16 +1493,24 @@ void WavefrontPathIntegrator::NRCTrainAndInferStep() {
             float *dst = nrcCompactTargets + nValid * kNRCOutputDims;
             const float *src =
                 nrcSuffixTarget + (size_t(i) * kNRCMaxSuffixLen + s) * kNRCOutputDims;
+            // Target stays raw Ls (no reflectance division): Muller et
+            // al.'s relative loss (Eq. 5) is defined on Ls and the actual
+            // radiance prediction L_hat_s = R*q, not on the raw network
+            // output q alone -- SpectralRelativeL2Loss (see
+            // spectral_relative_l2.h) does the R multiply internally,
+            // using the reflectance/weight aux below.
+            for (uint32_t c = 0; c < kNRCOutputDims; ++c)
+                dst[c] = std::max(0.f, src[c]);
+            float *dstAux = nrcCompactAux + nValid * (2 * kNRCOutputDims);
             const float *reflectance =
                 nrcSuffixReflectance + (size_t(i) * kNRCMaxSuffixLen + s) * NSpectrumSamples;
+            const float *chanWeight =
+                nrcSuffixChannelWeight +
+                    (size_t(i) * kNRCMaxSuffixLen + s) * NSpectrumSamples;
             for (uint32_t c = 0; c < kNRCOutputDims; ++c) {
-                float r = std::max(reflectance[c], 1e-3f);
-                dst[c] = std::max(0.f, src[c]) / r;
+                dstAux[c] = reflectance[c];
+                dstAux[kNRCOutputDims + c] = chanWeight[c];
             }
-            std::memcpy(nrcCompactChannelWeights + nValid * kNRCOutputDims,
-                        nrcSuffixChannelWeight +
-                            (size_t(i) * kNRCMaxSuffixLen + s) * NSpectrumSamples,
-                        kNRCOutputDims * sizeof(float));
             ++nValid;
         }
     }
@@ -1531,15 +1546,15 @@ void WavefrontPathIntegrator::NRCTrainAndInferStep() {
                         (trainBatch - nValid) * kNRCInputDims * sizeof(float));
             std::memset(nrcCompactTargets + nValid * kNRCOutputDims, 0,
                         (trainBatch - nValid) * kNRCOutputDims * sizeof(float));
-            // Zero channel weight -> Y=0 -> denom=0.01 (safe, finite) for
-            // the padding rows, same spirit as zeroing the padded
-            // inputs/targets above.
-            std::memset(nrcCompactChannelWeights + nValid * kNRCOutputDims, 0,
-                        (trainBatch - nValid) * kNRCOutputDims * sizeof(float));
+            // Zero reflectance and channel weight -> Y=0, R=0 -> predicted
+            // radiance and gradient both 0 (safe, finite) for the padding
+            // rows, same spirit as zeroing the padded inputs/targets above.
+            std::memset(nrcCompactAux + nValid * (2 * kNRCOutputDims), 0,
+                        (trainBatch - nValid) * (2 * kNRCOutputDims) * sizeof(float));
         }
         for (int step = 0; step < kNRCTrainSteps; ++step) {
             nrcLastLoss = nrcCache->TrainN(nrcCompactInputs, nrcCompactTargets, trainBatch,
-                                           nrcCompactChannelWeights);
+                                           nrcCompactAux);
             if (Options->nrcDebug)
                 fprintf(stderr,
                         "NRC TRAIN: sample=%d step=%d/%d nValid=%u trainBatch=%u loss=%.9g "

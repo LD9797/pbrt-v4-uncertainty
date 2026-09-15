@@ -336,9 +336,18 @@ class WavefrontPathIntegrator {
     float *nrcChannelWeight = nullptr;
     float *nrcSuffixChannelWeight = nullptr;
     // Compacted alongside nrcCompactTargets each training pass (see
-    // NRCTrainAndInferStep()); handed to NeuralRadianceCache::TrainN() as
-    // its optional per-sample channel-weight matrix.
-    float *nrcCompactChannelWeights = nullptr;
+    // NRCTrainAndInferStep()), 2*kNRCOutputDims floats per sample: channels
+    // [0, kNRCOutputDims) are the sample's spectral reflectance R = alpha+beta
+    // (copied from nrcReflectance/nrcSuffixReflectance) and channels
+    // [kNRCOutputDims, 2*kNRCOutputDims) are its CIE luminance weight
+    // (copied from nrcChannelWeight/nrcSuffixChannelWeight). Handed to
+    // NeuralRadianceCache::TrainN() as its optional auxiliary matrix: the
+    // SpectralRelativeL2 tcnn loss needs both R (to turn the network's raw
+    // output q into the actual radiance prediction L_hat_s = R*q, per
+    // Muller et al. 2021 Sec. 4.1) and the luminance weight (to compute
+    // that prediction's spectral luminance for Eq. 5's denominator) --
+    // see spectral_relative_l2.h.
+    float *nrcCompactAux = nullptr;
     // Persistent per-pixel predicted RGB image (sized to film resolution).
     // Populated by per-sample inference passes; written to EXR at end of Render().
     float *nrcPredictedRGB = nullptr;
