@@ -678,7 +678,19 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                 // guaranteed consistent with it. 0 for types with no specular-lobe
                 // concept (diffuse, hair, measured, etc.). Same clamping rationale
                 // as alpha above.
-                RGB betaRGB = film.ToOutputRGB(beta, lambda);
+                RGB betaRGB;
+                if constexpr (std::is_same_v<ConcreteBxDF, DielectricBxDF>) {
+                    // beta is spectrally constant here (F0 broadcast to every
+                    // channel, since dielectric eta is non-spectral) -- go
+                    // straight to a grey RGB instead of running it through
+                    // film.ToOutputRGB()'s wavelength-sampling Monte Carlo
+                    // estimator, which would inject sampling noise into a
+                    // value that has no actual spectral variation to estimate.
+                    Float f0 = beta[0];
+                    betaRGB = RGB(f0, f0, f0);
+                } else {
+                    betaRGB = film.ToOutputRGB(beta, lambda);
+                }
                 row[44] = Clamp(float(betaRGB.r), 0.f, 1.f);
                 row[45] = Clamp(float(betaRGB.g), 0.f, 1.f);
                 row[46] = Clamp(float(betaRGB.b), 0.f, 1.f);
