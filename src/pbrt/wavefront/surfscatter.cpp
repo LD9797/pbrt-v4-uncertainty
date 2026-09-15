@@ -720,6 +720,31 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                 // specific wavelengths, not an RGB triple.
                 for (int c = 0; c < NSpectrumSamples; ++c)
                     row[47 + c] = (lambda[c] - Lambda_min) / (Lambda_max - Lambda_min);
+                // Per-channel CIE luminance weight for this vertex's sampled
+                // wavelengths, consumed by the SpectralRelativeL2 tcnn loss
+                // (nrc_config.json) to compute a properly wavelength-weighted
+                // spectral luminance Y = dot(prediction, weight) instead of
+                // an unweighted mean across channels. Derived exactly the
+                // way PBRT itself converts a spectral sample to photometric
+                // luminance (SampledSpectrum::y(), util/spectrum.cpp):
+                // weight[c] = ybar(lambda_c) / (pdf_c * NSpectrumSamples *
+                // CIE_Y_integral). SafeDiv zeroes out channels whose pdf is
+                // 0 (e.g. terminated secondary wavelengths) instead of
+                // producing Inf/NaN.
+                {
+                    SampledSpectrum yBar = Spectra::Y().Sample(lambda);
+                    SampledSpectrum pdf = lambda.PDF();
+                    SampledSpectrum weight = SafeDiv(yBar, pdf) /
+                                             (NSpectrumSamples * CIE_Y_integral);
+                    float *channelWeightRow =
+                        nrcSuffixTrackThisVertex
+                            ? nrcSuffixChannelWeight +
+                                  (size_t(w.pixelIndex) * kNRCMaxSuffixLen +
+                                   nrcSuffixSlot) * NSpectrumSamples
+                            : nrcChannelWeight + size_t(w.pixelIndex) * NSpectrumSamples;
+                    for (int c = 0; c < NSpectrumSamples; ++c)
+                        channelWeightRow[c] = weight[c];
+                }
                 // Padding, constant 1 (paper pads to 64 for tile alignment).
                 row[47 + NSpectrumSamples] = 1.f;
                 row[48 + NSpectrumSamples] = 1.f;

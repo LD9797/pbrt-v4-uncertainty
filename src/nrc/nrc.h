@@ -21,7 +21,15 @@ class NeuralRadianceCache {
     float Train(const float *dInputs, const float *dTargets);
 
     // One training step over the full batchSize. Returns the loss.
-    float TrainN(const float *dInputs, const float *dTargets, uint32_t n);
+    // dChannelWeights, if non-null, is an nOutputDims-per-sample matrix
+    // (same layout as dTargets) forwarded verbatim to tcnn as the training
+    // step's "data_pdf" argument. Vanilla losses (RelativeL2, L2, ...)
+    // don't use it. It exists so pbrt-side code can hand the
+    // SpectralRelativeL2 loss (see nrc_config.json) per-sample,
+    // per-channel CIE luminance weights -- this class stays unaware of
+    // what the values actually mean; it just plumbs them through.
+    float TrainN(const float *dInputs, const float *dTargets, uint32_t n,
+                const float *dChannelWeights = nullptr);
 
     // Forward pass only. Writes nOutputDims*batchSize floats into dOutputs.
     void Inference(const float *dInputs, float *dOutputs);

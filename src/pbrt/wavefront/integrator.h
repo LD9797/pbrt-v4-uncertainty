@@ -320,6 +320,25 @@ class WavefrontPathIntegrator {
     // by pixelIndex * kNRCMaxSuffixLen + suffix slot).
     float *nrcReflectance = nullptr;
     float *nrcSuffixReflectance = nullptr;
+    // Per-channel CIE luminance weight for the wavelengths sampled at this
+    // vertex, NSpectrumSamples floats per slot: weight[c] = ybar(lambda_c)
+    // / (pdf_c * NSpectrumSamples * CIE_Y_integral), computed in
+    // surfscatter.cpp from the same SampledWavelengths used to build this
+    // slot's input row. Chosen so that dot(prediction, weight) equals
+    // exactly what SampledSpectrum::y(lambda) (util/spectrum.cpp) would
+    // compute as that predicted spectrum's photometric luminance. Consumed
+    // by the SpectralRelativeL2 tcnn loss (see nrc_config.json and
+    // external/tiny-cuda-nn/.../losses/spectral_relative_l2.h) so the
+    // network's spectral outputs share one wavelength-aware
+    // luminance-derived denominator, rather than an unweighted mean or
+    // independent per-channel normalization. Mirrors
+    // nrcReflectance/nrcSuffixReflectance's layout exactly.
+    float *nrcChannelWeight = nullptr;
+    float *nrcSuffixChannelWeight = nullptr;
+    // Compacted alongside nrcCompactTargets each training pass (see
+    // NRCTrainAndInferStep()); handed to NeuralRadianceCache::TrainN() as
+    // its optional per-sample channel-weight matrix.
+    float *nrcCompactChannelWeights = nullptr;
     // Persistent per-pixel predicted RGB image (sized to film resolution).
     // Populated by per-sample inference passes; written to EXR at end of Render().
     float *nrcPredictedRGB = nullptr;

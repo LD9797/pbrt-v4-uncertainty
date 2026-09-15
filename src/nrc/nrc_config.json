@@ -1,6 +1,6 @@
 {
     "loss": {
-        "otype": "RelativeL2"
+        "otype": "SpectralRelativeL2"
     },
     "optimizer": {
         "otype": "Adam",

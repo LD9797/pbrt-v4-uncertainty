@@ -76,9 +76,16 @@ float NeuralRadianceCache::Train(const float *dInputs, const float *dTargets) {
 
 // One training step over the full batchSize. Returns the loss.
 float NeuralRadianceCache::TrainN(const float *dInputs, const float *dTargets,
-                                   uint32_t n) {
+                                   uint32_t n, const float *dChannelWeights) {
     tcnn::GPUMatrix<float> inputs(const_cast<float *>(dInputs), nInputDims, n);
     tcnn::GPUMatrix<float> targets(const_cast<float *>(dTargets), nOutputDims, n);
+    if (dChannelWeights) {
+        tcnn::GPUMatrix<float> channelWeights(const_cast<float *>(dChannelWeights),
+                                              nOutputDims, n);
+        auto ctx = impl->model.trainer->training_step(inputs, targets, &channelWeights);
+        impl->lastLoss = impl->model.trainer->loss(*ctx);
+        return impl->lastLoss;
+    }
     auto ctx = impl->model.trainer->training_step(inputs, targets);
     impl->lastLoss = impl->model.trainer->loss(*ctx);
     return impl->lastLoss;

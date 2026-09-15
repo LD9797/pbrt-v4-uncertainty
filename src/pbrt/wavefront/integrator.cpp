@@ -341,6 +341,10 @@ WavefrontPathIntegrator::WavefrontPathIntegrator(
                           sizeof(float) * kNRCInputDims * nrcCompactCapacity);
         cudaMallocManaged(&nrcCompactTargets,
                           sizeof(float) * kNRCOutputDims * nrcCompactCapacity);
+        cudaMallocManaged(&nrcCompactChannelWeights,
+                          sizeof(float) * kNRCOutputDims * nrcCompactCapacity);
+        cudaMemset(nrcCompactChannelWeights, 0,
+                   sizeof(float) * kNRCOutputDims * nrcCompactCapacity);
         cudaMallocManaged(&nrcInferenceOutputs,
                           sizeof(float) * kNRCOutputDims * nrcBatchSize);
         cudaMemset(nrcInferenceOutputs, 0,
@@ -360,6 +364,10 @@ WavefrontPathIntegrator::WavefrontPathIntegrator(
         cudaMallocManaged(&nrcReflectance,
                           sizeof(float) * NSpectrumSamples * nrcBatchSize);
         cudaMemset(nrcReflectance, 0,
+                   sizeof(float) * NSpectrumSamples * nrcBatchSize);
+        cudaMallocManaged(&nrcChannelWeight,
+                          sizeof(float) * NSpectrumSamples * nrcBatchSize);
+        cudaMemset(nrcChannelWeight, 0,
                    sizeof(float) * NSpectrumSamples * nrcBatchSize);
 
         // Training-suffix buffers (see integrator.h for the full design
@@ -389,6 +397,8 @@ WavefrontPathIntegrator::WavefrontPathIntegrator(
                           sizeof(float) * kNRCInputDims * nrcBatchSize);
         cudaMallocManaged(&nrcSuffixReflectance, sizeof(float) * NSpectrumSamples *
                                                      kNRCMaxSuffixLen * nrcBatchSize);
+        cudaMallocManaged(&nrcSuffixChannelWeight, sizeof(float) * NSpectrumSamples *
+                                                       kNRCMaxSuffixLen * nrcBatchSize);
         cudaMemset(nrcSuffixActive, 0, sizeof(uint8_t) * nrcBatchSize);
         cudaMemset(nrcSuffixLen, 0, sizeof(uint8_t) * nrcBatchSize);
         cudaMemset(nrcSuffixTerminatedByHeuristic, 0,
@@ -409,6 +419,8 @@ WavefrontPathIntegrator::WavefrontPathIntegrator(
         cudaMemset(nrcSuffixBootstrapInputs, 0,
                    sizeof(float) * kNRCInputDims * nrcBatchSize);
         cudaMemset(nrcSuffixReflectance, 0,
+                   sizeof(float) * NSpectrumSamples * kNRCMaxSuffixLen * nrcBatchSize);
+        cudaMemset(nrcSuffixChannelWeight, 0,
                    sizeof(float) * NSpectrumSamples * kNRCMaxSuffixLen * nrcBatchSize);
 
         nrcCache = new nrc::NeuralRadianceCache(nrcBatchSize, kNRCInputDims,
@@ -1480,6 +1492,10 @@ void WavefrontPathIntegrator::NRCTrainAndInferStep() {
                 float r = std::max(reflectance[c], 1e-3f);
                 dst[c] = std::max(0.f, src[c]) / r;
             }
+            std::memcpy(nrcCompactChannelWeights + nValid * kNRCOutputDims,
+                        nrcSuffixChannelWeight +
+                            (size_t(i) * kNRCMaxSuffixLen + s) * NSpectrumSamples,
+                        kNRCOutputDims * sizeof(float));
             ++nValid;
         }
     }
@@ -1515,9 +1531,15 @@ void WavefrontPathIntegrator::NRCTrainAndInferStep() {
                         (trainBatch - nValid) * kNRCInputDims * sizeof(float));
             std::memset(nrcCompactTargets + nValid * kNRCOutputDims, 0,
                         (trainBatch - nValid) * kNRCOutputDims * sizeof(float));
+            // Zero channel weight -> Y=0 -> denom=0.01 (safe, finite) for
+            // the padding rows, same spirit as zeroing the padded
+            // inputs/targets above.
+            std::memset(nrcCompactChannelWeights + nValid * kNRCOutputDims, 0,
+                        (trainBatch - nValid) * kNRCOutputDims * sizeof(float));
         }
         for (int step = 0; step < kNRCTrainSteps; ++step) {
-            nrcLastLoss = nrcCache->TrainN(nrcCompactInputs, nrcCompactTargets, trainBatch);
+            nrcLastLoss = nrcCache->TrainN(nrcCompactInputs, nrcCompactTargets, trainBatch,
+                                           nrcCompactChannelWeights);
             if (Options->nrcDebug)
                 fprintf(stderr,
                         "NRC TRAIN: sample=%d step=%d/%d nValid=%u trainBatch=%u loss=%.9g "
