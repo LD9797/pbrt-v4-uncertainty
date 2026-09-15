@@ -311,13 +311,19 @@ class WavefrontPathIntegrator {
     float *nrcSnapshotL = nullptr;       // NSpectrumSamples floats/slot: L accumulated strictly before the query vertex's own shading
     // Spectral hemispherical-directional reflectance (bsdf.rho()) at the
     // vertex whose input row was just written, NSpectrumSamples floats per
-    // slot, clamped to [0,1]. Used to factor the network's prediction as
-    // Ls/reflectance rather than raw Ls (Muller et al. 2021's "reflectance
-    // factorization", Sec. 4.1), which improves color reproduction and
-    // glossy highlight detail. nrcReflectance mirrors nrcInputs (one slot
-    // per render-query path, indexed by pixelIndex); nrcSuffixReflectance
-    // mirrors nrcSuffixInputs (one slot per training-suffix vertex, indexed
-    // by pixelIndex * kNRCMaxSuffixLen + suffix slot).
+    // slot, clamped to [0,1]. The network is trained to output a factored
+    // quantity q; this reflectance R = alpha+beta is used to reconstruct
+    // the actual radiance prediction L_hat_s = R*q (Muller et al. 2021's
+    // "reflectance factorization", Sec. 4.1), which improves color
+    // reproduction and glossy highlight detail. That reconstruction happens
+    // inside the SpectralRelativeL2 tcnn loss during training (see
+    // nrcCompactAux below and spectral_relative_l2.h) and directly in
+    // NRCTrainAndInferStep() at render-substitution/bootstrap time -- the
+    // training target itself stays raw (un-factored) Ls. nrcReflectance
+    // mirrors nrcInputs (one slot per render-query path, indexed by
+    // pixelIndex); nrcSuffixReflectance mirrors nrcSuffixInputs (one slot
+    // per training-suffix vertex, indexed by pixelIndex * kNRCMaxSuffixLen +
+    // suffix slot).
     float *nrcReflectance = nullptr;
     float *nrcSuffixReflectance = nullptr;
     // Per-channel CIE luminance weight for the wavelengths sampled at this

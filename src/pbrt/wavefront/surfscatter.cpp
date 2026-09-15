@@ -632,12 +632,16 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                     // bucketed as "diffuse" for lack of a better split.
                     alpha = bsdf.rho(wo, ucRho, uRho);
                 }
-                // Combined reflectance used ONLY to factor the network's
-                // prediction as Ls/R (Muller et al. 2021 Sec. 4.1). Kept
-                // distinct from alpha/beta below, which are fed to the
-                // network as separate input features -- feeding the network
-                // alpha+beta instead of alpha alone would leak beta into the
-                // "diffuse" input slot.
+                // Combined reflectance R = alpha+beta (Muller et al. 2021
+                // Sec. 4.1), used to reconstruct the actual radiance
+                // prediction L_hat_s = R*q from the network's raw factored
+                // output q -- done inside the SpectralRelativeL2 tcnn loss
+                // (spectral_relative_l2.h) and at inference/bootstrap time
+                // (NRCTrainAndInferStep()), not by dividing the training
+                // target here. Kept distinct from alpha/beta below, which
+                // are fed to the network as separate input features --
+                // feeding the network alpha+beta instead of alpha alone
+                // would leak beta into the "diffuse" input slot.
                 SampledSpectrum reflectanceFactor = alpha + beta;
 
                 Point3f p(w.pi);
@@ -648,7 +652,7 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                         : nrcInputs + size_t(w.pixelIndex) * kNRCInputDims;
                 // Spectral hemispherical-directional reflectance at this
                 // vertex, stored alongside the input row for later use
-                // factoring the network's prediction as Ls/reflectance
+                // reconstructing the network's radiance prediction as R*q
                 // (Muller et al. 2021 Sec. 4.1) -- see integrator.h.
                 float *reflectanceRow =
                     nrcSuffixTrackThisVertex

@@ -1476,7 +1476,13 @@ void WavefrontPathIntegrator::NRCTrainAndInferStep() {
         const float *rSrc = nrcReflectance + size_t(i) * NSpectrumSamples;
         const float *wSrc = nrcChannelWeight + size_t(i) * NSpectrumSamples;
         for (uint32_t c = 0; c < kNRCOutputDims; ++c) {
-            dstAux[c] = rSrc[c];
+            // Same 1e-3 floor NRCTrainAndInferStep's render substitution and
+            // NRCTrainingSuffixFinish's bootstrap seed apply to reflectance
+            // before multiplying it by the network's raw output -- training
+            // must reconstruct L_hat_s = R*q with the exact same R contract
+            // those two use, or the loss trains against a value inference
+            // never actually reproduces whenever R < 1e-3.
+            dstAux[c] = std::max(rSrc[c], 1e-3f);
             dstAux[kNRCOutputDims + c] = wSrc[c];
         }
         ++nValid;
@@ -1508,7 +1514,10 @@ void WavefrontPathIntegrator::NRCTrainAndInferStep() {
                 nrcSuffixChannelWeight +
                     (size_t(i) * kNRCMaxSuffixLen + s) * NSpectrumSamples;
             for (uint32_t c = 0; c < kNRCOutputDims; ++c) {
-                dstAux[c] = reflectance[c];
+                // Same 1e-3 floor as the non-suffix branch above (and as
+                // render substitution/bootstrap) -- keeps R's contract
+                // identical everywhere it's used to reconstruct L_hat_s = R*q.
+                dstAux[c] = std::max(reflectance[c], 1e-3f);
                 dstAux[kNRCOutputDims + c] = chanWeight[c];
             }
             ++nValid;
@@ -1784,15 +1793,17 @@ void WavefrontPathIntegrator::NRCInferenceForRenderPaths() {
         "NRC render substitution", batch, PBRT_CPU_GPU_LAMBDA(int i) {
             if (!renderQuery[i])
                 return;
-            // The network predicts factored radiance (Ls / reflectance) at
-            // the query vertex, at this path's own sampled wavelengths (see
-            // the input row's wavelength dims in surfscatter.cpp) --
-            // independent of any particular path's history, exactly like
-            // the suffix training targets it's trained on (see
-            // NRCTrainAndInferStep()'s reflectance-factored compaction).
-            // Multiplying back by the same spectral reflectance recovers
-            // the predicted scattered radiance; that must then be weighted
-            // by the real prefix throughput that got this path to the query
+            // The network predicts a factored quantity q at the query
+            // vertex, at this path's own sampled wavelengths (see the input
+            // row's wavelength dims in surfscatter.cpp) -- independent of
+            // any particular path's history. The suffix training targets it
+            // is trained against are raw (un-factored) Ls; the R = alpha+beta
+            // reflectance factorization happens inside the SpectralRelativeL2
+            // loss itself (spectral_relative_l2.h), which reconstructs
+            // L_hat_s = R*q before comparing it to Ls. Multiplying back by
+            // the same spectral reflectance here recovers that same
+            // predicted scattered radiance; that must then be weighted by
+            // the real prefix throughput that got this path to the query
             // vertex (nrcSnapshotBeta, captured at that vertex in
             // surfscatter.cpp), the same way a real continuation ray's
             // radiance would be.
