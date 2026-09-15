@@ -593,19 +593,37 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                     // -- no specular term.
                     alpha = bxdf.GetR();
                 } else if constexpr (std::is_same_v<ConcreteBxDF, DielectricBxDF>) {
-                    // Smooth/rough dielectric interface: purely specular
-                    // reflection (plus transmission, which isn't
-                    // "reflectance" and is excluded). Use the normal-incidence
-                    // Fresnel reflectance as a stable, spectrally-flat
-                    // estimate of the specular term -- pbrt's DielectricBxDF
-                    // uses a single non-spectral eta, so there's no spectral
-                    // variation to capture here anyway.
-                    beta = SampledSpectrum(bxdf.F0());
+                    // Directional specular reflectance beta(x,omega): unlike
+                    // F0() (Fresnel at normal incidence only), estimate rho
+                    // at this vertex's actual outgoing direction and
+                    // roughness -- restricted to the Reflection lobe only,
+                    // since bsdf.rho()'s default sampling would also draw
+                    // transmission samples, which aren't "reflectance". Same
+                    // Monte Carlo estimator as BxDF::rho() (bxdfs.cpp), just
+                    // called directly on the concrete BxDF with sampleFlags
+                    // pinned to Reflection.
+                    Vector3f woLocal = bsdf.RenderToLocal(wo);
+                    SampledSpectrum r(0.f);
+                    if (woLocal.z != 0) {
+                        for (int i = 0; i < nRhoSamples; ++i) {
+                            pstd::optional<BSDFSample> bs = bxdf.Sample_f(
+                                woLocal, ucRho[i], uRho[i], TransportMode::Radiance,
+                                BxDFReflTransFlags::Reflection);
+                            if (bs && bs->pdf > 0)
+                                r += bs->f * AbsCosTheta(bs->wi) / bs->pdf;
+                        }
+                        r /= nRhoSamples;
+                    }
+                    beta = r;
                 } else if constexpr (std::is_same_v<ConcreteBxDF, ConductorBxDF>) {
                     // Purely specular/glossy reflection off a conductor: no
-                    // diffuse term. F0() is the normal-incidence complex
-                    // Fresnel reflectance, spectral via eta/k.
-                    beta = bxdf.F0();
+                    // transmission and no diffuse term, so the ordinary
+                    // combined rho() estimate already IS the directional
+                    // specular reflectance beta(x,omega) at this vertex's
+                    // actual outgoing direction and roughness -- no need to
+                    // restrict sampleFlags here like the dielectric case, and
+                    // more accurate than F0()'s normal-incidence-only value.
+                    beta = bsdf.rho(wo, ucRho, uRho);
                 } else {
                     // No explicit decomposition yet for this BxDF type
                     // (diffuse transmission, thin dielectric, layered/coated,
