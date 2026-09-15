@@ -36,3 +36,6 @@
 [submodule "src/ext/zlib"]
 	path = src/ext/zlib
 	url = https://github.com/madler/zlib.git
+[submodule "external/tiny-cuda-nn"]
+	path = external/tiny-cuda-nn
+	url = https://github.com/NVlabs/tiny-cuda-nn.git
