@@ -1474,12 +1474,11 @@ void WavefrontPathIntegrator::NRCTrainAndInferStep() {
             float *dst = nrcCompactTargets + nValid * kNRCOutputDims;
             const float *src =
                 nrcSuffixTarget + (size_t(i) * kNRCMaxSuffixLen + s) * kNRCOutputDims;
-            const float *reflectance =
-                nrcSuffixReflectance + (size_t(i) * kNRCMaxSuffixLen + s) * NSpectrumSamples;
-            for (uint32_t c = 0; c < kNRCOutputDims; ++c) {
-                float r = std::max(reflectance[c], 1e-3f);
-                dst[c] = std::max(0.f, src[c]) / r;
-            }
+            // Reflectance factorization temporarily disabled (target = Ls,
+            // not Ls/R) -- see NRCTrainingSuffixFinish() and
+            // NRCInferenceForRenderPaths() for the matching disable.
+            for (uint32_t c = 0; c < kNRCOutputDims; ++c)
+                dst[c] = std::max(0.f, src[c]);
             ++nValid;
         }
     }
@@ -1610,7 +1609,6 @@ void WavefrontPathIntegrator::NRCTrainingSuffixFinish() {
         const float *step = nrcSuffixStep;
         float *target = nrcSuffixTarget;
         const float *bootstrapOutputs = nrcInferenceOutputs;
-        const float *reflectance = nrcSuffixReflectance;
         const uint32_t cap = kNRCMaxSuffixLen;
         const uint32_t batch = nrcBatchSize;
         const bool warmedUp = nrcWarmedUp;
@@ -1631,13 +1629,13 @@ void WavefrontPathIntegrator::NRCTrainingSuffixFinish() {
                 // continuation (equivalent to a natural end), same as if
                 // no bootstrap query had been made at all.
                 if (terminatedByHeuristic[i] && warmedUp) {
-                    for (int c = 0; c < NSpectrumSamples; ++c) {
-                        float refl = std::max(
-                            reflectance[(size_t(i) * cap + m) * NSpectrumSamples + c],
-                            1e-3f);
-                        Lnext[c] = refl * std::max(
+                    // Reflectance factorization temporarily disabled: the
+                    // network's raw output IS Ls now, not Ls/R -- see the
+                    // matching disable in NRCTrainAndInferStep() and
+                    // NRCInferenceForRenderPaths().
+                    for (int c = 0; c < NSpectrumSamples; ++c)
+                        Lnext[c] = std::max(
                             0.f, bootstrapOutputs[i * (int)kNRCOutputDims + c]);
-                    }
                 }
                 for (int s = int(m) - 1; s >= 0; --s) {
                     SampledSpectrum localS, stepS;
@@ -1692,15 +1690,12 @@ void WavefrontPathIntegrator::NRCTrainingSuffixFinish() {
                     nrcSampleCounter, i, maxS, m, (int)nrcSuffixTerminatedByHeuristic[i],
                     maxAbs);
             SampledSpectrum Lnext(0.f);
+            // Reflectance factorization temporarily disabled here too, to
+            // stay consistent with the main backward-propagation pass above.
             if (nrcSuffixTerminatedByHeuristic[i] && nrcWarmedUp) {
-                for (int c = 0; c < NSpectrumSamples; ++c) {
-                    float refl = std::max(
-                        nrcSuffixReflectance[(size_t(i) * kNRCMaxSuffixLen + m) *
-                                                 NSpectrumSamples + c],
-                        1e-3f);
-                    Lnext[c] = refl * std::max(
+                for (int c = 0; c < NSpectrumSamples; ++c)
+                    Lnext[c] = std::max(
                         0.f, nrcInferenceOutputs[i * (int)kNRCOutputDims + c]);
-                }
             }
             for (int s = int(m) - 1; s >= 0; --s) {
                 SampledSpectrum localS, stepS;
@@ -1740,31 +1735,28 @@ void WavefrontPathIntegrator::NRCInferenceForRenderPaths() {
     const uint8_t *renderQuery = nrcRenderQuery;
     const float *outputs = nrcInferenceOutputs;
     const float *snapshotBeta = nrcSnapshotBeta;
-    const float *reflectance = nrcReflectance;
     auto *psState = &pixelSampleState;
     const uint32_t batch = nrcBatchSize;
     ParallelFor(
         "NRC render substitution", batch, PBRT_CPU_GPU_LAMBDA(int i) {
             if (!renderQuery[i])
                 return;
-            // The network predicts factored radiance (Ls / reflectance) at
-            // the query vertex, at this path's own sampled wavelengths (see
-            // the input row's wavelength dims in surfscatter.cpp) --
-            // independent of any particular path's history, exactly like
-            // the suffix training targets it's trained on (see
-            // NRCTrainAndInferStep()'s reflectance-factored compaction).
-            // Multiplying back by the same spectral reflectance recovers
-            // the predicted scattered radiance; that must then be weighted
-            // by the real prefix throughput that got this path to the query
-            // vertex (nrcSnapshotBeta, captured at that vertex in
-            // surfscatter.cpp), the same way a real continuation ray's
-            // radiance would be.
+            // The network predicts radiance Ls at the query vertex, at this
+            // path's own sampled wavelengths (see the input row's
+            // wavelength dims in surfscatter.cpp) -- independent of any
+            // particular path's history, exactly like the suffix training
+            // targets it's trained on (see NRCTrainAndInferStep()). That
+            // must then be weighted by the real prefix throughput that got
+            // this path to the query vertex (nrcSnapshotBeta, captured at
+            // that vertex in surfscatter.cpp), the same way a real
+            // continuation ray's radiance would be.
+            // Reflectance factorization temporarily disabled: the network's
+            // raw output IS Ls now, not Ls/R -- see the matching disable in
+            // NRCTrainAndInferStep() and NRCTrainingSuffixFinish().
             SampledSpectrum predicted;
             for (int c = 0; c < NSpectrumSamples; ++c) {
-                float networkValue =
+                predicted[c] =
                     std::max(0.f, outputs[i * (int)kNRCOutputDims + c]);
-                float r = std::max(reflectance[i * NSpectrumSamples + c], 1e-3f);
-                predicted[c] = networkValue * r;
             }
             SampledSpectrum beta;
             for (int c = 0; c < NSpectrumSamples; ++c)
