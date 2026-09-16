@@ -8,6 +8,7 @@
 #include <pbrt/options.h>
 #include <pbrt/samplers.h>
 #include <pbrt/util/bluenoise.h>
+#include <pbrt/util/hash.h>
 #include <pbrt/util/spectrum.h>
 #include <pbrt/util/vecmath.h>
 #include <pbrt/wavefront/integrator.h>
@@ -69,6 +70,33 @@ void WavefrontPathIntegrator::GenerateCameraRays(int y0, Transform movingFromCam
             pixelSampleState.filterWeight[pixelIndex] = cameraSample.filterWeight;
             if (initializeVisibleSurface)
                 pixelSampleState.visibleSurface[pixelIndex] = VisibleSurface();
+
+#ifdef PBRT_BUILD_NRC
+            if (nrcTrainingPath != nullptr) {
+                constexpr int tileW = 8;
+                constexpr int tileH = 4;
+
+                Vector2i rel = pPixel - pixelBounds.pMin;
+
+                // One global offset for all tiles in this sample.
+                uint32_t offset = Hash(sampleIndex) % (tileW * tileH);
+
+                int offsetX = int(offset % tileW);
+                int offsetY = int(offset / tileW);
+
+                bool isTrainingPath = nrcCaptureAll || ((rel.x % tileW) == offsetX &&
+                                                        (rel.y % tileH) == offsetY);
+
+                nrcTrainingPath[pixelIndex] = isTrainingPath ? 1 : 0;
+            }
+
+            // Prime the area-spread path-termination tracking (Muller et al.
+            // 2021, Eq. 3-4): x0 is the camera vertex, needed to compute the
+            // Eq. 4 baseline a0 once the primary vertex x1 is hit.
+            if (nrcPathPrevP != nullptr && cameraRay)
+                nrcPathPrevP[pixelIndex] = cameraRay->ray.o;
+
+#endif
 
             // Enqueue camera ray for intersection tests
             if (cameraRay) {

@@ -258,7 +258,7 @@ extern "C" __global__ void __raygen__shadow() {
     uint32_t missed = 0;
     Trace(params.traversable, sr.ray, sr.tMax, OPTIX_RAY_FLAG_NONE, missed);
 
-    RecordShadowRayResult(sr, &params.pixelSampleState, !missed);
+    RecordShadowRayResult(sr, &params.pixelSampleState, !missed, params.nrcSuffixLocal);
 }
 
 extern "C" __global__ void __miss__shadow() {
@@ -288,7 +288,8 @@ extern "C" __global__ void __raygen__shadow_Tr() {
                        },
                        [&](Point3f p) -> Ray {
                            return ctx.SpawnRayTo(p);
-                       });
+                       },
+                       params.nrcSuffixLocal);
 }
 
 extern "C" __global__ void __miss__shadow_Tr() {
