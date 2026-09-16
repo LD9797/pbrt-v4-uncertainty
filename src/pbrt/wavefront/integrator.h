@@ -24,6 +24,7 @@
 #include <pbrt/wavefront/workqueue.h>
 
 #include <cstdint>
+#include <random>
 #include <string>
 #include <vector>
 
@@ -279,6 +280,20 @@ class WavefrontPathIntegrator {
     static constexpr uint32_t kNRCInputDims = 49 + NSpectrumSamples;
     static constexpr uint32_t kNRCOutputDims = NSpectrumSamples;
 
+    // Muller et al. 2021 Sec. 4.2: each frame trains on a fixed budget of
+    // kNRCTrainingBudget records total, shuffled and split into
+    // kNRCTrainingBatches DISJOINT batches of kNRCTrainingBatchSize records
+    // each -- every gradient step sees a fresh, non-overlapping subset,
+    // never the same record twice within one sample. If fewer than the
+    // budget were accumulated this sample, the available records are
+    // divided (without duplication -- never reused to pad out a batch)
+    // across at most kNRCTrainingBatches batches instead. See
+    // NRCTrainAccumulatedRecords().
+    static constexpr uint32_t kNRCTrainingBatchSize = 16384;
+    static constexpr uint32_t kNRCTrainingBatches = 4;
+    static constexpr uint32_t kNRCTrainingBudget =
+        kNRCTrainingBatchSize * kNRCTrainingBatches;
+
     // Muller et al. 2021 Sec. 3.4 "Path Termination": all paths are
     // terminated according to the area-spread heuristic below, which picks
     // the query vertex dynamically per path (rather than always the first
@@ -430,6 +445,20 @@ class WavefrontPathIntegrator {
     // call. This is what makes one NRC network update cover a whole SPP
     // instead of one update per scanline band.
     uint32_t nrcAccumulatedRecords = 0;
+    // Shuffled-and-selected training records for this sample, gathered from
+    // nrcCompactInputs/Targets/Aux by NRCTrainAccumulatedRecords(); holds at
+    // most kNRCTrainingBudget rows, laid out as kNRCTrainingBatches
+    // contiguous fixed-size slots of kNRCTrainingBatchSize rows each so one
+    // slot's zero-padding (when a batch is short) can never overlap another
+    // slot's real data.
+    float *nrcBudgetInputs = nullptr;
+    float *nrcBudgetTargets = nullptr;
+    float *nrcBudgetAux = nullptr;
+    // Reused scratch permutation of [0, nrcAccumulatedRecords), rebuilt and
+    // reshuffled each call to NRCTrainAccumulatedRecords(); nrcShuffleRNG is
+    // the persistent (deterministic-seed) generator driving that shuffle.
+    std::vector<uint32_t> nrcTrainingIndices;
+    std::mt19937 nrcShuffleRNG{0x5eedu};
 
     // Host-only running diagnostics for this pass, accumulated across each
     // wavefrontDepth's TraceShadowRays() call and reset in

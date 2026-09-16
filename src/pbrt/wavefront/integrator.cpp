@@ -36,6 +36,7 @@
 #include <iostream>
 #include <map>
 #include <algorithm>
+#include <numeric>
 #include <vector>
 
 #ifdef PBRT_BUILD_GPU_RENDERER
@@ -343,6 +344,16 @@ WavefrontPathIntegrator::WavefrontPathIntegrator(
                           sizeof(float) * 2 * kNRCOutputDims * nrcCompactCapacity);
         cudaMemset(nrcCompactAux, 0,
                    sizeof(float) * 2 * kNRCOutputDims * nrcCompactCapacity);
+        // Fixed-budget shuffled training buffers (see
+        // NRCTrainAccumulatedRecords()): kNRCTrainingBatches slots of
+        // kNRCTrainingBatchSize rows each, gathered fresh from
+        // nrcCompactInputs/Targets/Aux every sample.
+        cudaMallocManaged(&nrcBudgetInputs,
+                          sizeof(float) * kNRCInputDims * kNRCTrainingBudget);
+        cudaMallocManaged(&nrcBudgetTargets,
+                          sizeof(float) * kNRCOutputDims * kNRCTrainingBudget);
+        cudaMallocManaged(&nrcBudgetAux,
+                          sizeof(float) * 2 * kNRCOutputDims * kNRCTrainingBudget);
         cudaMallocManaged(&nrcInferenceOutputs,
                           sizeof(float) * kNRCOutputDims * nrcBatchSize);
         cudaMemset(nrcInferenceOutputs, 0,
@@ -1553,11 +1564,11 @@ void WavefrontPathIntegrator::NRCTrainAccumulatedRecords() {
     // records into nrcCompactInputs/Targets/Aux (see
     // NRCAccumulateTrainingRecords()); nrcAccumulatedRecords is the total
     // across all of them.
-    uint32_t nValid = nrcAccumulatedRecords;
+    uint32_t available = nrcAccumulatedRecords;
 
-    if (nValid > 0 && Options->nrcDebug) {
-        LogFiniteStats("TRAIN INPUT", nrcCompactInputs, size_t(nValid) * kNRCInputDims);
-        LogFiniteStats("TRAIN TARGET", nrcCompactTargets, size_t(nValid) * kNRCOutputDims);
+    if (available > 0 && Options->nrcDebug) {
+        LogFiniteStats("TRAIN INPUT", nrcCompactInputs, size_t(available) * kNRCInputDims);
+        LogFiniteStats("TRAIN TARGET", nrcCompactTargets, size_t(available) * kNRCOutputDims);
 
         // One-time (first sample only) per-dimension breakdown to find
         // which of the kNRCInputDims input features is out of the expected
@@ -1566,7 +1577,7 @@ void WavefrontPathIntegrator::NRCTrainAccumulatedRecords() {
         if (nrcSampleCounter == 0) {
             for (uint32_t d = 0; d < kNRCInputDims; ++d) {
                 float minV = Infinity, maxV = -Infinity;
-                for (uint32_t i = 0; i < nValid; ++i) {
+                for (uint32_t i = 0; i < available; ++i) {
                     float v = nrcCompactInputs[i * kNRCInputDims + d];
                     if (std::isfinite(v)) {
                         minV = std::min(minV, v);
@@ -1578,29 +1589,78 @@ void WavefrontPathIntegrator::NRCTrainAccumulatedRecords() {
         }
     }
 
-    // One Adam/L2 training step over every record accumulated this sample.
-    const int kNRCTrainSteps = Options->nrcTrainSteps;
-    if (nValid > 0) {
-        uint32_t trainBatch = nrc::NeuralRadianceCache::RoundUpBatch(nValid);
-        if (trainBatch > nValid) {
-            std::memset(nrcCompactInputs + nValid * kNRCInputDims, 0,
-                        (trainBatch - nValid) * kNRCInputDims * sizeof(float));
-            std::memset(nrcCompactTargets + nValid * kNRCOutputDims, 0,
-                        (trainBatch - nValid) * kNRCOutputDims * sizeof(float));
-            // Zero reflectance and channel weight -> Y=0, R=0 -> predicted
-            // radiance and gradient both 0 (safe, finite) for the padding
-            // rows, same spirit as zeroing the padded inputs/targets above.
-            std::memset(nrcCompactAux + nValid * (2 * kNRCOutputDims), 0,
-                        (trainBatch - nValid) * (2 * kNRCOutputDims) * sizeof(float));
-        }
-        for (int step = 0; step < kNRCTrainSteps; ++step) {
-            nrcLastLoss = nrcCache->TrainN(nrcCompactInputs, nrcCompactTargets, trainBatch,
-                                           nrcCompactAux);
+    // Muller et al. 2021 Sec. 4.2: train on a fixed budget of at most
+    // kNRCTrainingBudget records, shuffled first so a sub-budget sample
+    // (available < budget) is an unbiased random subset rather than
+    // whichever records happened to be compacted first, then split into up
+    // to kNRCTrainingBatches DISJOINT batches -- each gradient step sees a
+    // fresh, non-overlapping subset, never the same record twice this
+    // sample. When available < budget, the records are divided (without
+    // duplication) across fewer/smaller batches instead of padding the
+    // budget out with repeats.
+    uint32_t used = std::min(available, kNRCTrainingBudget);
+    if (used > 0) {
+        nrcTrainingIndices.resize(available);
+        std::iota(nrcTrainingIndices.begin(), nrcTrainingIndices.end(), 0u);
+        std::shuffle(nrcTrainingIndices.begin(), nrcTrainingIndices.end(), nrcShuffleRNG);
+
+        uint32_t batches = std::min<uint32_t>(
+            kNRCTrainingBatches,
+            (used + kNRCTrainingBatchSize - 1) / kNRCTrainingBatchSize);
+        uint32_t base = used / batches;
+        uint32_t remainder = used % batches;
+        uint32_t srcIdx = 0;
+        for (uint32_t b = 0; b < batches; ++b) {
+            uint32_t count = base + (b < remainder ? 1u : 0u);
+            if (count == 0)
+                continue;
+
+            // Each batch gets its own fixed-size kNRCTrainingBatchSize slot
+            // (rather than flat contiguous packing) so a short batch's
+            // zero-padding up to its tcnn-rounded size can never bleed into
+            // the next batch's real data. count <= kNRCTrainingBatchSize
+            // always (batches is chosen so base/base+1 never exceed it), so
+            // RoundUpBatch(count) always fits inside the slot.
+            float *slotInputs = nrcBudgetInputs +
+                                size_t(b) * kNRCTrainingBatchSize * kNRCInputDims;
+            float *slotTargets = nrcBudgetTargets +
+                                 size_t(b) * kNRCTrainingBatchSize * kNRCOutputDims;
+            float *slotAux = nrcBudgetAux +
+                             size_t(b) * kNRCTrainingBatchSize * (2 * kNRCOutputDims);
+            for (uint32_t j = 0; j < count; ++j, ++srcIdx) {
+                uint32_t src = nrcTrainingIndices[srcIdx];
+                std::memcpy(slotInputs + size_t(j) * kNRCInputDims,
+                            nrcCompactInputs + size_t(src) * kNRCInputDims,
+                            kNRCInputDims * sizeof(float));
+                std::memcpy(slotTargets + size_t(j) * kNRCOutputDims,
+                            nrcCompactTargets + size_t(src) * kNRCOutputDims,
+                            kNRCOutputDims * sizeof(float));
+                std::memcpy(slotAux + size_t(j) * (2 * kNRCOutputDims),
+                            nrcCompactAux + size_t(src) * (2 * kNRCOutputDims),
+                            2 * kNRCOutputDims * sizeof(float));
+            }
+
+            uint32_t trainBatch = nrc::NeuralRadianceCache::RoundUpBatch(count);
+            if (trainBatch > count) {
+                std::memset(slotInputs + size_t(count) * kNRCInputDims, 0,
+                            (trainBatch - count) * kNRCInputDims * sizeof(float));
+                std::memset(slotTargets + size_t(count) * kNRCOutputDims, 0,
+                            (trainBatch - count) * kNRCOutputDims * sizeof(float));
+                // Zero reflectance and channel weight -> Y=0, R=0 ->
+                // predicted radiance and gradient both 0 (safe, finite) for
+                // the padding rows, same spirit as zeroing the padded
+                // inputs/targets above.
+                std::memset(slotAux + size_t(count) * (2 * kNRCOutputDims), 0,
+                            (trainBatch - count) * (2 * kNRCOutputDims) * sizeof(float));
+            }
+
+            nrcLastLoss =
+                nrcCache->TrainN(slotInputs, slotTargets, trainBatch, slotAux);
             if (Options->nrcDebug)
                 fprintf(stderr,
-                        "NRC TRAIN: sample=%d step=%d/%d nValid=%u trainBatch=%u loss=%.9g "
-                        "finite=%d\n",
-                        nrcSampleCounter, step + 1, kNRCTrainSteps, nValid, trainBatch,
+                        "NRC TRAIN: sample=%d batch=%u/%u available=%u used=%u count=%u "
+                        "trainBatch=%u loss=%.9g finite=%d\n",
+                        nrcSampleCounter, b + 1, batches, available, used, count, trainBatch,
                         nrcLastLoss, std::isfinite(nrcLastLoss) ? 1 : 0);
         }
 
@@ -1621,8 +1681,8 @@ void WavefrontPathIntegrator::NRCTrainAccumulatedRecords() {
     nrcWarmedUp = nrcSampleCounter >= Options->nrcWarmupSamples;
     if ((nrcSampleCounter & 31) == 0) {
         LOG_VERBOSE("NRC: step %d loss %f", nrcSampleCounter, nrcLastLoss);
-        if (nValid > 0 && Options->nrcDebug)
-            LogNRCMagnitudeStats("target", nrcCompactTargets, nValid, (int)kNRCOutputDims);
+        if (used > 0 && Options->nrcDebug)
+            LogNRCMagnitudeStats("target", nrcCompactTargets, available, (int)kNRCOutputDims);
     }
 }
 
