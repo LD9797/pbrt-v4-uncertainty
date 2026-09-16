@@ -318,7 +318,7 @@ class WavefrontPathIntegrator {
     // reproduction and glossy highlight detail. That reconstruction happens
     // inside the SpectralRelativeL2 tcnn loss during training (see
     // nrcCompactAux below and spectral_relative_l2.h) and directly in
-    // NRCTrainAndInferStep() at render-substitution/bootstrap time -- the
+    // NRCTrainAccumulatedRecords() at render-substitution/bootstrap time -- the
     // training target itself stays raw (un-factored) Ls. nrcReflectance
     // mirrors nrcInputs (one slot per render-query path, indexed by
     // pixelIndex); nrcSuffixReflectance mirrors nrcSuffixInputs (one slot
@@ -342,7 +342,7 @@ class WavefrontPathIntegrator {
     float *nrcChannelWeight = nullptr;
     float *nrcSuffixChannelWeight = nullptr;
     // Compacted alongside nrcCompactTargets each training pass (see
-    // NRCTrainAndInferStep()), 2*kNRCOutputDims floats per sample: channels
+    // NRCTrainAccumulatedRecords()), 2*kNRCOutputDims floats per sample: channels
     // [0, kNRCOutputDims) are the sample's spectral reflectance R = alpha+beta
     // (copied from nrcReflectance/nrcSuffixReflectance) and channels
     // [kNRCOutputDims, 2*kNRCOutputDims) are its CIE luminance weight
@@ -420,7 +420,16 @@ class WavefrontPathIntegrator {
     float *nrcSuffixStep = nullptr;        // kNRCMaxSuffixLen*NSpectrumSamples floats/slot: per-suffix-vertex step factor (f*cos/pdf) to the next vertex
     float *nrcSuffixTarget = nullptr;      // kNRCMaxSuffixLen*kNRCOutputDims floats/slot: backward-propagated RGB target, filled by NRCTrainingSuffixFinish()
     float *nrcSuffixBootstrapInputs = nullptr;  // nrcBatchSize*kNRCInputDims scratch: bootstrap rows gathered contiguously for one Inference() call
-    uint32_t nrcCompactCapacity = 0;       // capacity of nrcCompactInputs/nrcCompactTargets in rows (> nrcBatchSize to allow room for suffix records)
+    uint32_t nrcCompactCapacity = 0;       // capacity of nrcCompactInputs/nrcCompactTargets in rows (>= nPasses * nrcBatchSize to allow room for suffix records across every scanline band in a full sample)
+    // Running count of valid rows written into nrcCompactInputs/Targets/Aux
+    // so far this sample (i.e. across all scanline bands rendered with the
+    // SAME network state). Reset to 0 by Render() at the start of each
+    // sampleIndex iteration; advanced by each band's
+    // NRCAccumulateTrainingRecords() call; consumed (and left as-is -- NOT
+    // reset here) by the single end-of-sample NRCTrainAccumulatedRecords()
+    // call. This is what makes one NRC network update cover a whole SPP
+    // instead of one update per scanline band.
+    uint32_t nrcAccumulatedRecords = 0;
 
     // Host-only running diagnostics for this pass, accumulated across each
     // wavefrontDepth's TraceShadowRays() call and reset in
@@ -435,7 +444,15 @@ class WavefrontPathIntegrator {
 
     void NRCResetSampleBuffers();
     void NRCCaptureFinalRadiance();
-    void NRCTrainAndInferStep();
+    // Gather + compact this band's valid training records (first-hit +
+    // suffix) into nrcCompactInputs/Targets/Aux, appending starting at
+    // nrcAccumulatedRecords. Does NOT train -- call once per scanline band.
+    void NRCAccumulateTrainingRecords();
+    // Run the actual tcnn training step(s) over all records accumulated so
+    // far (nrcAccumulatedRecords), advances nrcSampleCounter/nrcWarmedUp.
+    // Call once per full sample (SPP), after every scanline band has been
+    // rendered and accumulated with the same network state.
+    void NRCTrainAccumulatedRecords();
     void NRCInferenceForRenderPaths();
     void NRCTrainingSuffixFinish();
     void NRCDumpPredictedImage(const std::string &filename);

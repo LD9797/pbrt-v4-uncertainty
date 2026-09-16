@@ -234,13 +234,7 @@ WavefrontPathIntegrator::WavefrontPathIntegrator(
     // Compute number of scanlines to render per pass
     Vector2i resolution = film.PixelBounds().Diagonal();
     // TODO: make this configurable. Base it on the amount of GPU memory?
-    // Temporary experiment: bumped way up (was 1024 * 1024) to force
-    // Crown into a single scanline pass, confirming whether the NRC
-    // cache-state discontinuity between passes (network trained between
-    // passes, so each pass renders with a different cache state) is the
-    // cause of the horizontal-split artifact. Revert to 1024 * 1024
-    // once confirmed/fixed.
-    int maxSamples = 4 * 1024 * 1024;
+    int maxSamples = 1024 * 1024;
     scanlinesPerPass = std::max(1, maxSamples / resolution.x);
     int nPasses = (resolution.y + scanlinesPerPass - 1) / scanlinesPerPass;
     scanlinesPerPass = (resolution.y + nPasses - 1) / nPasses;
@@ -336,7 +330,11 @@ WavefrontPathIntegrator::WavefrontPathIntegrator(
         // (nrcBatchSize/32 * (1 + kNRCMaxSuffixLen)) with a lot of margin,
         // without paying for the full 5x (nrcBatchSize * (1+kNRCMaxSuffixLen))
         // bound that would apply if every path were a training path.
-        nrcCompactCapacity = 2 * nrcBatchSize;
+        // Training records now accumulate across every scanline band in a
+        // full sample before a single tcnn update runs (see
+        // NRCAccumulateTrainingRecords()/NRCTrainAccumulatedRecords()), so
+        // this needs nPasses times the single-band bound above.
+        nrcCompactCapacity = size_t(nPasses) * 2 * nrcBatchSize;
         cudaMallocManaged(&nrcCompactInputs,
                           sizeof(float) * kNRCInputDims * nrcCompactCapacity);
         cudaMallocManaged(&nrcCompactTargets,
@@ -520,6 +518,13 @@ Float WavefrontPathIntegrator::Render() {
         if (sampleIndex < lastSampleIndex) {
             // Render image for sample _sampleIndex_
             LOG_VERBOSE("Starting to submit work for sample %d", sampleIndex);
+#ifdef PBRT_BUILD_NRC
+            // Every scanline band below renders with the SAME network state
+            // (only NRCTrainAccumulatedRecords(), once all bands are done,
+            // actually updates it) -- so training records accumulate across
+            // the whole sample here, not per band.
+            nrcAccumulatedRecords = 0;
+#endif
             for (int y0 = pixelBounds.pMin.y; y0 < pixelBounds.pMax.y;
                  y0 += scanlinesPerPass) {
                 // Generate camera rays for current scanline range
@@ -656,10 +661,20 @@ Float WavefrontPathIntegrator::Render() {
                                       (int)NSpectrumSamples);
                 }
                 NRCTrainingSuffixFinish();
-                // Current scanline pass has finished gathering valid training samples.
-                NRCTrainAndInferStep();
+                // This band's valid training samples are gathered into the
+                // sample-wide accumulation buffer, but NOT trained on yet --
+                // every remaining band this sample still needs to render
+                // with the exact same network state.
+                NRCAccumulateTrainingRecords();
 #endif
             }
+
+#ifdef PBRT_BUILD_NRC
+            // Every scanline band for this sample rendered with (and
+            // contributed records from) the same network state -- now do a
+            // single tcnn update covering the whole sample.
+            NRCTrainAccumulatedRecords();
+#endif
 
             // Copy updated film pixels to buffer for the display server.
             if (Options->useGPU && !Options->displayServer.empty())
@@ -1453,16 +1468,19 @@ void LogSuffixStepStats(const char *label, const float *step,
 }
 }  // namespace
 
-void WavefrontPathIntegrator::NRCTrainAndInferStep() {
+void WavefrontPathIntegrator::NRCAccumulateTrainingRecords() {
     if (!nrcCache)
         return;
     // Ensure all device writes (first-hit capture in surfscatter, target RGB
-    // capture in UpdateFilm) are visible before tcnn reads the buffers.
+    // capture in UpdateFilm) are visible before the memcpy's below read them.
     cudaDeviceSynchronize();
 
-    // One Adam/L2 training step over valid samples only. Compact them into a
-    // contiguous prefix first so tcnn never sees the zero-padded invalid slots.
-    uint32_t nValid = 0;
+    // Compact this band's valid records into a contiguous prefix of
+    // nrcCompactInputs/Targets/Aux, appending after whatever earlier bands
+    // this sample already wrote (nrcAccumulatedRecords) so tcnn never sees
+    // the zero-padded invalid slots and every band's records survive to the
+    // single end-of-sample training step.
+    uint32_t nValid = nrcAccumulatedRecords;
     for (uint32_t i = 0; i < nrcBatchSize && nValid < nrcCompactCapacity; ++i) {
         if (!nrcValid[i]) continue;
         std::memcpy(nrcCompactInputs  + nValid * kNRCInputDims,
@@ -1476,7 +1494,7 @@ void WavefrontPathIntegrator::NRCTrainAndInferStep() {
         const float *rSrc = nrcReflectance + size_t(i) * NSpectrumSamples;
         const float *wSrc = nrcChannelWeight + size_t(i) * NSpectrumSamples;
         for (uint32_t c = 0; c < kNRCOutputDims; ++c) {
-            // Same 1e-3 floor NRCTrainAndInferStep's render substitution and
+            // Same 1e-3 floor NRCTrainAccumulatedRecords' render substitution and
             // NRCTrainingSuffixFinish's bootstrap seed apply to reflectance
             // before multiplying it by the network's raw output -- training
             // must reconstruct L_hat_s = R*q with the exact same R contract
@@ -1524,6 +1542,19 @@ void WavefrontPathIntegrator::NRCTrainAndInferStep() {
         }
     }
 
+    nrcAccumulatedRecords = nValid;
+}
+
+void WavefrontPathIntegrator::NRCTrainAccumulatedRecords() {
+    if (!nrcCache)
+        return;
+
+    // Every scanline band this sample has already compacted its valid
+    // records into nrcCompactInputs/Targets/Aux (see
+    // NRCAccumulateTrainingRecords()); nrcAccumulatedRecords is the total
+    // across all of them.
+    uint32_t nValid = nrcAccumulatedRecords;
+
     if (nValid > 0 && Options->nrcDebug) {
         LogFiniteStats("TRAIN INPUT", nrcCompactInputs, size_t(nValid) * kNRCInputDims);
         LogFiniteStats("TRAIN TARGET", nrcCompactTargets, size_t(nValid) * kNRCOutputDims);
@@ -1547,6 +1578,7 @@ void WavefrontPathIntegrator::NRCTrainAndInferStep() {
         }
     }
 
+    // One Adam/L2 training step over every record accumulated this sample.
     const int kNRCTrainSteps = Options->nrcTrainSteps;
     if (nValid > 0) {
         uint32_t trainBatch = nrc::NeuralRadianceCache::RoundUpBatch(nValid);

@@ -224,7 +224,7 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
             // regardless of warmup state, so every render path keeps
             // bouncing normally (real NEE + indirect continuation) and the
             // network's predictions never get baked into the film. NRC
-            // training (capture/suffix generation/NRCTrainAndInferStep)
+            // training (capture/suffix generation/NRCAccumulateTrainingRecords)
             // keeps running unaffected, since none of that is gated on
             // nrcTerminateAndSubstitute. Flip back to true to re-enable
             // render-time substitution.
@@ -637,7 +637,7 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                 // prediction L_hat_s = R*q from the network's raw factored
                 // output q -- done inside the SpectralRelativeL2 tcnn loss
                 // (spectral_relative_l2.h) and at inference/bootstrap time
-                // (NRCTrainAndInferStep()), not by dividing the training
+                // (NRCTrainAccumulatedRecords()), not by dividing the training
                 // target here. Kept distinct from alpha/beta below, which
                 // are fed to the network as separate input features --
                 // feeding the network alpha+beta instead of alpha alone
