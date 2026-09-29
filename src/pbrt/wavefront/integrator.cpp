@@ -308,6 +308,7 @@ WavefrontPathIntegrator::WavefrontPathIntegrator(
         cudaMallocManaged(&nrcValid, sizeof(uint8_t) * nrcBatchSize);
         cudaMallocManaged(&nrcReachedQueryVertex, sizeof(uint8_t) * nrcBatchSize);
         cudaMallocManaged(&nrcTrainingPath, sizeof(uint8_t) * nrcBatchSize);
+        cudaMallocManaged(&nrcUnbiasedTrainingPath, sizeof(uint8_t) * nrcBatchSize);
         cudaMallocManaged(&nrcPathSpreadAccum, sizeof(float) * nrcBatchSize);
         cudaMallocManaged(&nrcPathA0, sizeof(float) * nrcBatchSize);
         cudaMallocManaged(&nrcPathPrevP, sizeof(Point3f) * nrcBatchSize);
@@ -319,6 +320,7 @@ WavefrontPathIntegrator::WavefrontPathIntegrator(
         cudaMemset(nrcValid, 0, sizeof(uint8_t) * nrcBatchSize);
         cudaMemset(nrcReachedQueryVertex, 0, sizeof(uint8_t) * nrcBatchSize);
         cudaMemset(nrcTrainingPath, 0, sizeof(uint8_t) * nrcBatchSize);
+        cudaMemset(nrcUnbiasedTrainingPath, 0, sizeof(uint8_t) * nrcBatchSize);
         cudaMemset(nrcPathSpreadAccum, 0, sizeof(float) * nrcBatchSize);
         cudaMemset(nrcPathA0, 0, sizeof(float) * nrcBatchSize);
         cudaMemset(nrcPathPrevP, 0, sizeof(Point3f) * nrcBatchSize);
@@ -385,6 +387,7 @@ WavefrontPathIntegrator::WavefrontPathIntegrator(
         // (== NSpectrumSamples) floats per record -- raw spectral radiance,
         // matching what the network is trained to output.
         cudaMallocManaged(&nrcSuffixActive, sizeof(uint8_t) * nrcBatchSize);
+        cudaMallocManaged(&nrcSuffixRROnly, sizeof(uint8_t) * nrcBatchSize);
         cudaMallocManaged(&nrcSuffixLen, sizeof(uint8_t) * nrcBatchSize);
         cudaMallocManaged(&nrcSuffixTerminatedByHeuristic,
                           sizeof(uint8_t) * nrcBatchSize);
@@ -397,7 +400,7 @@ WavefrontPathIntegrator::WavefrontPathIntegrator(
         cudaMallocManaged(&nrcSuffixInputs, sizeof(float) * kNRCInputDims *
                                                 kNRCMaxSuffixLen * nrcBatchSize);
         cudaMallocManaged(&nrcSuffixLocal, sizeof(float) * NSpectrumSamples *
-                                               kNRCMaxSuffixLen * nrcBatchSize);
+                                               kNRCSuffixLocalStride * nrcBatchSize);
         cudaMallocManaged(&nrcSuffixStep, sizeof(float) * NSpectrumSamples *
                                               kNRCMaxSuffixLen * nrcBatchSize);
         cudaMallocManaged(&nrcSuffixTarget, sizeof(float) * kNRCOutputDims *
@@ -409,6 +412,7 @@ WavefrontPathIntegrator::WavefrontPathIntegrator(
         cudaMallocManaged(&nrcSuffixChannelWeight, sizeof(float) * NSpectrumSamples *
                                                        kNRCMaxSuffixLen * nrcBatchSize);
         cudaMemset(nrcSuffixActive, 0, sizeof(uint8_t) * nrcBatchSize);
+        cudaMemset(nrcSuffixRROnly, 0, sizeof(uint8_t) * nrcBatchSize);
         cudaMemset(nrcSuffixLen, 0, sizeof(uint8_t) * nrcBatchSize);
         cudaMemset(nrcSuffixTerminatedByHeuristic, 0,
                    sizeof(uint8_t) * nrcBatchSize);
@@ -420,7 +424,7 @@ WavefrontPathIntegrator::WavefrontPathIntegrator(
         cudaMemset(nrcSuffixInputs, 0,
                    sizeof(float) * kNRCInputDims * kNRCMaxSuffixLen * nrcBatchSize);
         cudaMemset(nrcSuffixLocal, 0,
-                   sizeof(float) * NSpectrumSamples * kNRCMaxSuffixLen * nrcBatchSize);
+                   sizeof(float) * NSpectrumSamples * kNRCSuffixLocalStride * nrcBatchSize);
         cudaMemset(nrcSuffixStep, 0,
                    sizeof(float) * NSpectrumSamples * kNRCMaxSuffixLen * nrcBatchSize);
         cudaMemset(nrcSuffixTarget, 0,
@@ -851,7 +855,12 @@ void WavefrontPathIntegrator::HandleEscapedRays() {
                     // HandleEmissiveIntersection() for the full rationale
                     // (must NOT be scaled by any accumulated throughput; the
                     // backward recursion in NRCTrainingSuffixFinish() owns
-                    // all of that).
+                    // all of that). Exception: an RR-only suffix has no
+                    // backward recursion at all (see nrcSuffixRROnly in
+                    // integrator.h) -- it accumulates forward into a single
+                    // reserved slot, so its contribution IS pre-scaled here
+                    // by the running nrcSuffixBeta, and added (never
+                    // overwritten) alongside every other vertex's.
                     if (nrcSuffixActive != nullptr && nrcSuffixActive[w.pixelIndex]) {
                         SampledSpectrum Llocal(0.f);
                         if (w.depth == 0 || w.specularBounce) {
@@ -863,11 +872,20 @@ void WavefrontPathIntegrator::HandleEscapedRays() {
                                 w.r_l * lightChoicePDFLocal * light.PDF_Li(ctxLocal, w.rayd, true);
                             Llocal = Le / (w.r_u + r_lLocal).Average();
                         }
-                        uint32_t slot = nrcSuffixLen[w.pixelIndex];
-                        for (int c = 0; c < NSpectrumSamples; ++c)
-                            nrcSuffixLocal[(size_t(w.pixelIndex) * kNRCMaxSuffixLen + slot) *
-                                               NSpectrumSamples +
-                                           c] += Llocal[c];
+                        bool rrOnly = nrcSuffixRROnly[w.pixelIndex] != 0;
+                        uint32_t slot = rrOnly ? kNRCMaxSuffixLen : nrcSuffixLen[w.pixelIndex];
+                        size_t base =
+                            (size_t(w.pixelIndex) * kNRCSuffixLocalStride + slot) *
+                            NSpectrumSamples;
+                        if (rrOnly) {
+                            for (int c = 0; c < NSpectrumSamples; ++c)
+                                nrcSuffixLocal[base + c] +=
+                                    nrcSuffixBeta[w.pixelIndex * NSpectrumSamples + c] *
+                                    Llocal[c];
+                        } else {
+                            for (int c = 0; c < NSpectrumSamples; ++c)
+                                nrcSuffixLocal[base + c] += Llocal[c];
+                        }
                     }
 #endif
                 }
@@ -879,11 +897,18 @@ void WavefrontPathIntegrator::HandleEscapedRays() {
             // invalid-BSDF-sample/Russian-roulette natural ends do in
             // surfscatter.cpp. nrcSuffixLen already correctly counts this
             // vertex (set by the previous vertex's surfscatter.cpp call
-            // before this ray was even traced); only nrcSuffixActive needs
-            // clearing here, purely for state hygiene (nothing reads it
-            // again for this pixel this pass regardless).
-            if (nrcSuffixActive != nullptr && nrcSuffixActive[w.pixelIndex])
+            // before this ray was even traced) for an ORDINARY suffix; an
+            // RR-only suffix, however, deliberately never advances
+            // nrcSuffixLen past 0 while alive (see nrcSuffixRROnly in
+            // integrator.h), so it must be finalized to exactly 1 here --
+            // there's always exactly one training record (the query
+            // vertex), regardless of how many real vertices this RR-only
+            // tail actually visited before escaping.
+            if (nrcSuffixActive != nullptr && nrcSuffixActive[w.pixelIndex]) {
+                if (nrcSuffixRROnly != nullptr && nrcSuffixRROnly[w.pixelIndex])
+                    nrcSuffixLen[w.pixelIndex] = 1;
                 nrcSuffixActive[w.pixelIndex] = 0;
+            }
 #endif
 
             // Update pixel radiance if ray's radiance is nonzero
@@ -945,6 +970,14 @@ void WavefrontPathIntegrator::HandleEmissiveIntersection() {
             // currently occupies (nrcSuffixLen hasn't advanced for this
             // vertex yet -- that happens in surfscatter.cpp, which runs
             // after this kernel for the same wavefront depth).
+            //
+            // RR-only suffix exception: there's no backward recursion for
+            // these (see nrcSuffixRROnly in integrator.h), so throughput
+            // compounding has nowhere else to happen -- this contribution
+            // IS pre-scaled by the running nrcSuffixBeta here, and ADDED
+            // (never overwritten) into the shared reserved accumulator slot,
+            // since multiple vertices along an RR-only tail can each
+            // contribute their own emission event to that same slot.
             if (nrcSuffixActive != nullptr && nrcSuffixActive[w.pixelIndex]) {
                 SampledSpectrum Llocal(0.f);
                 if (w.depth == 0 || w.specularBounce) {
@@ -959,11 +992,18 @@ void WavefrontPathIntegrator::HandleEmissiveIntersection() {
                     SampledSpectrum r_lLocal = w.r_l * lightPDFLocal;
                     Llocal = Le / (r_uLocal + r_lLocal).Average();
                 }
-                uint32_t slot = nrcSuffixLen[w.pixelIndex];
-                for (int c = 0; c < NSpectrumSamples; ++c)
-                    nrcSuffixLocal[(size_t(w.pixelIndex) * kNRCMaxSuffixLen + slot) *
-                                       NSpectrumSamples +
-                                   c] = Llocal[c];
+                bool rrOnly = nrcSuffixRROnly[w.pixelIndex] != 0;
+                uint32_t slot = rrOnly ? kNRCMaxSuffixLen : nrcSuffixLen[w.pixelIndex];
+                size_t base = (size_t(w.pixelIndex) * kNRCSuffixLocalStride + slot) *
+                              NSpectrumSamples;
+                if (rrOnly) {
+                    for (int c = 0; c < NSpectrumSamples; ++c)
+                        nrcSuffixLocal[base + c] +=
+                            nrcSuffixBeta[w.pixelIndex * NSpectrumSamples + c] * Llocal[c];
+                } else {
+                    for (int c = 0; c < NSpectrumSamples; ++c)
+                        nrcSuffixLocal[base + c] = Llocal[c];
+                }
             }
 #endif
 
@@ -1003,7 +1043,7 @@ void WavefrontPathIntegrator::TraceShadowRays(int wavefrontDepth) {
             nrcSuffixNEEGenMax = std::max(nrcSuffixNEEGenMax, mag);
 
             const float *src = nrcSuffixLocal +
-                               (size_t(w.pixelIndex) * kNRCMaxSuffixLen + w.nrcSuffixSlot) *
+                               (size_t(w.pixelIndex) * kNRCSuffixLocalStride + w.nrcSuffixSlot) *
                                    NSpectrumSamples;
             float *dst = nrcSuffixLocalSnapshotScratch.data() + size_t(i) * NSpectrumSamples;
             for (int c = 0; c < NSpectrumSamples; ++c)
@@ -1032,7 +1072,7 @@ void WavefrontPathIntegrator::TraceShadowRays(int wavefrontDepth) {
             if (!ld)
                 continue;
             const float *cur = nrcSuffixLocal +
-                               (size_t(w.pixelIndex) * kNRCMaxSuffixLen + w.nrcSuffixSlot) *
+                               (size_t(w.pixelIndex) * kNRCSuffixLocalStride + w.nrcSuffixSlot) *
                                    NSpectrumSamples;
             const float *before =
                 nrcSuffixLocalSnapshotScratch.data() + size_t(i) * NSpectrumSamples;
@@ -1809,12 +1849,14 @@ void WavefrontPathIntegrator::NRCTrainingSuffixFinish() {
     {
         const uint8_t *terminatedByHeuristic = nrcSuffixTerminatedByHeuristic;
         const uint8_t *suffixLen = nrcSuffixLen;
+        const uint8_t *rrOnlyFlag = nrcSuffixRROnly;
         const float *local = nrcSuffixLocal;
         const float *step = nrcSuffixStep;
         float *target = nrcSuffixTarget;
         const float *bootstrapOutputs = nrcInferenceOutputs;
         const float *reflectance = nrcSuffixReflectance;
         const uint32_t cap = kNRCMaxSuffixLen;
+        const uint32_t localStride = kNRCSuffixLocalStride;
         const uint32_t batch = nrcBatchSize;
         const bool warmedUp = nrcWarmedUp;
         ParallelFor(
@@ -1822,6 +1864,21 @@ void WavefrontPathIntegrator::NRCTrainingSuffixFinish() {
                 uint32_t m = suffixLen[i];
                 if (m == 0)
                     return;
+                // RR-only ("unbiased") suffix: there's no per-vertex
+                // local[]/step[] data to walk (surfscatter.cpp never wrote
+                // any -- see nrcSuffixRROnly in integrator.h), so skip the
+                // backward recursion entirely. The suffix's single training
+                // record (always slot 0, m is always exactly 1) is just the
+                // already-fully-accumulated running target sitting in
+                // nrcSuffixLocal's reserved slot (index cap).
+                if (rrOnlyFlag[i]) {
+                    const float *acc =
+                        local + (size_t(i) * localStride + cap) * NSpectrumSamples;
+                    float *t = target + size_t(i) * cap * kNRCOutputDims;
+                    for (int c = 0; c < NSpectrumSamples; ++c)
+                        t[c] = acc[c];
+                    return;
+                }
                 SampledSpectrum Lnext(0.f);
                 // Only let the network's own bootstrap prediction influence
                 // targets once it's actually warmed up -- otherwise an
@@ -1845,7 +1902,7 @@ void WavefrontPathIntegrator::NRCTrainingSuffixFinish() {
                 for (int s = int(m) - 1; s >= 0; --s) {
                     SampledSpectrum localS, stepS;
                     for (int c = 0; c < NSpectrumSamples; ++c) {
-                        localS[c] = local[(size_t(i) * cap + s) * NSpectrumSamples + c];
+                        localS[c] = local[(size_t(i) * localStride + s) * NSpectrumSamples + c];
                         stepS[c] = step[(size_t(i) * cap + s) * NSpectrumSamples + c];
                     }
                     SampledSpectrum Ls = localS + stepS * Lnext;
@@ -1891,9 +1948,21 @@ void WavefrontPathIntegrator::NRCTrainingSuffixFinish() {
             uint32_t m = nrcSuffixLen[i];
             fprintf(stderr,
                     "NRC max-target trace (sample=%d):\ni=%u\nslot=%d\n"
-                    "suffixLength=%u\nterminatedByHeuristic=%d\ntargetMax=%.9g\n\n",
+                    "suffixLength=%u\nterminatedByHeuristic=%d\nrrOnly=%d\ntargetMax=%.9g\n\n",
                     nrcSampleCounter, i, maxS, m, (int)nrcSuffixTerminatedByHeuristic[i],
-                    maxAbs);
+                    (int)nrcSuffixRROnly[i], maxAbs);
+            if (nrcSuffixRROnly[i]) {
+                // No backward recursion to replay for an RR-only suffix --
+                // its single target IS the accumulator in nrcSuffixLocal's
+                // reserved slot (see NRCTrainingSuffixFinish() above).
+                const float *acc =
+                    nrcSuffixLocal +
+                    (size_t(i) * kNRCSuffixLocalStride + kNRCMaxSuffixLen) *
+                        NSpectrumSamples;
+                fprintf(stderr,
+                        "  RR-only accumulator=(%.9g,%.9g,%.9g,%.9g)\n\n",
+                        acc[0], acc[1], acc[2], acc[3]);
+            } else {
             SampledSpectrum Lnext(0.f);
             if (nrcSuffixTerminatedByHeuristic[i] && nrcWarmedUp) {
                 for (int c = 0; c < NSpectrumSamples; ++c) {
@@ -1909,7 +1978,7 @@ void WavefrontPathIntegrator::NRCTrainingSuffixFinish() {
                 SampledSpectrum localS, stepS;
                 for (int c = 0; c < NSpectrumSamples; ++c) {
                     localS[c] =
-                        nrcSuffixLocal[(size_t(i) * kNRCMaxSuffixLen + s) * NSpectrumSamples + c];
+                        nrcSuffixLocal[(size_t(i) * kNRCSuffixLocalStride + s) * NSpectrumSamples + c];
                     stepS[c] =
                         nrcSuffixStep[(size_t(i) * kNRCMaxSuffixLen + s) * NSpectrumSamples + c];
                 }
@@ -1923,6 +1992,7 @@ void WavefrontPathIntegrator::NRCTrainingSuffixFinish() {
                 Lnext = Ls;
             }
             fprintf(stderr, "\n");
+            }
         }
     }
 }

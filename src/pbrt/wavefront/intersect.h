@@ -53,7 +53,7 @@ inline PBRT_CPU_GPU void RecordShadowRayResult(const ShadowRayWorkItem w,
     // aren't part of an active, non-bootstrap training suffix.
     if (nrcSuffixLocal != nullptr && w.nrcSuffixLd) {
         SampledSpectrum suffixLd = w.nrcSuffixLd / (w.r_u + w.r_l).Average();
-        size_t base = (size_t(w.pixelIndex) * kNRCMaxSuffixLen + w.nrcSuffixSlot) *
+        size_t base = (size_t(w.pixelIndex) * kNRCSuffixLocalStride + w.nrcSuffixSlot) *
                       NSpectrumSamples;
         for (int c = 0; c < NSpectrumSamples; ++c)
             nrcSuffixLocal[base + c] += suffixLd[c];
@@ -298,7 +298,7 @@ inline PBRT_CPU_GPU void TraceTransmittance(ShadowRayWorkItem sr,
         // non-bootstrap training suffix.
         if (nrcSuffixLocal != nullptr && sr.nrcSuffixLd) {
             SampledSpectrum suffixLd = sr.nrcSuffixLd * weight;
-            size_t base = (size_t(sr.pixelIndex) * kNRCMaxSuffixLen + sr.nrcSuffixSlot) *
+            size_t base = (size_t(sr.pixelIndex) * kNRCSuffixLocalStride + sr.nrcSuffixSlot) *
                           NSpectrumSamples;
             for (int c = 0; c < NSpectrumSamples; ++c)
                 nrcSuffixLocal[base + c] += suffixLd[c];

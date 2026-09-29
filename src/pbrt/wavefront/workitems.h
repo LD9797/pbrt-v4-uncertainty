@@ -27,6 +27,19 @@ namespace pbrt {
 // ShadowRayWorkItem below.
 constexpr uint32_t kNRCMaxSuffixLen = 4;
 
+// nrcSuffixLocal is allocated with one extra slot per pixel beyond
+// kNRCMaxSuffixLen (index kNRCMaxSuffixLen itself, never used by ordinary
+// suffixes, whose slots only ever range over [0, kNRCMaxSuffixLen)). RR-only
+// ("unbiased") training suffixes -- see integrator.h -- reuse that single
+// reserved slot as a running accumulator for their entire (potentially much
+// longer than kNRCMaxSuffixLen) tail, instead of advancing through per-vertex
+// slots. ShadowRayWorkItem::nrcSuffixSlot is set to this same sentinel value
+// (kNRCMaxSuffixLen) for RR-only shadow rays, so RecordShadowRayResult
+// (intersect.h) needs no rrOnly-specific branch at all: it just always adds
+// into nrcSuffixLocal[pixelIndex*kNRCSuffixLocalStride + slot], and slot is
+// either an ordinary vertex index or this reserved accumulator index.
+constexpr uint32_t kNRCSuffixLocalStride = kNRCMaxSuffixLen + 1;
+
 // RaySamples Definition
 struct RaySamples {
     // RaySamples Public Members
@@ -182,7 +195,11 @@ struct ShadowRayWorkItem {
     // shadow ray is unoccluded. Zero (a harmless no-op add) when this
     // vertex isn't part of an active, non-bootstrap training suffix, or for
     // shadow rays spawned from medium/subsurface scattering (out of scope
-    // for the suffix mechanism).
+    // for the suffix mechanism). For an RR-only ("unbiased") suffix vertex,
+    // nrcSuffixLd is pre-scaled by that suffix's current nrcSuffixBeta at
+    // push time (surfscatter.cpp) and nrcSuffixSlot is set to the reserved
+    // sentinel value kNRCMaxSuffixLen, so it accumulates into the shared
+    // running-target slot instead of a per-vertex one.
     SampledSpectrum nrcSuffixLd;
     int nrcSuffixSlot;
 };

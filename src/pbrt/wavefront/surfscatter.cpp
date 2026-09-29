@@ -257,9 +257,20 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                     nrcSuffixActive[w.pixelIndex] = 1;
                     nrcSuffixLen[w.pixelIndex] = 0;
                     nrcSuffixTerminatedByHeuristic[w.pixelIndex] = 0;
+                    nrcSuffixRROnly[w.pixelIndex] = nrcUnbiasedTrainingPath[w.pixelIndex];
                     for (int c = 0; c < NSpectrumSamples; ++c) {
                         nrcSuffixBeta[w.pixelIndex * NSpectrumSamples + c] = 1.f;
-                        nrcSuffixLocal[w.pixelIndex * kNRCMaxSuffixLen * NSpectrumSamples +
+                        nrcSuffixLocal[(size_t(w.pixelIndex) * kNRCSuffixLocalStride + 0) *
+                                           NSpectrumSamples +
+                                       c] = 0.f;
+                        // Reserved accumulator slot (see workitems.h /
+                        // integrator.h) for this suffix's RR-only running
+                        // target, if it turns out to be one -- harmless to
+                        // zero unconditionally for ordinary suffixes too,
+                        // since they never touch this slot.
+                        nrcSuffixLocal[(size_t(w.pixelIndex) * kNRCSuffixLocalStride +
+                                       kNRCMaxSuffixLen) *
+                                           NSpectrumSamples +
                                        c] = 0.f;
                     }
                     Float d1Sq = DistanceSquared(nrcPathPrevP[w.pixelIndex], Point3f(w.pi));
@@ -293,7 +304,13 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
             bool nrcSuffixTrackThisVertex =
                 nrcInputs != nullptr && nrcSuffixActive[w.pixelIndex];
             bool nrcSuffixIsBootstrapVertex = false;
-            if (nrcSuffixTrackThisVertex) {
+            // RR-only ("unbiased") suffix: never area-spread-terminated,
+            // never bootstrap-capped, never advances past slot 0 -- see
+            // nrcSuffixRROnly's declaration in integrator.h for the full
+            // rationale.
+            bool nrcSuffixRR =
+                nrcSuffixTrackThisVertex && nrcSuffixRROnly[w.pixelIndex] != 0;
+            if (nrcSuffixTrackThisVertex && !nrcSuffixRR) {
                 nrcSuffixSlot = nrcSuffixLen[w.pixelIndex];
                 if (nrcSuffixSlot > 0) {
                     Point3f p(w.pi);
@@ -504,7 +521,8 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                     // Skipped for the bootstrap vertex: it gets no record of
                     // its own, only its input features (written below) for
                     // the NRC query.
-                    if (nrcSuffixTrackThisVertex && !nrcSuffixIsBootstrapVertex) {
+                    if (nrcSuffixTrackThisVertex && !nrcSuffixIsBootstrapVertex &&
+                        !nrcSuffixRR) {
                         SampledSpectrum suffixStep = bsdfSample->f * AbsDot(wi, ns) /
                                                      bsdfSample->pdf * nrcSuffixRRFactor;
                         SampledSpectrum newSuffixBeta;
@@ -521,7 +539,7 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                         for (int c = 0; c < NSpectrumSamples; ++c) {
                             nrcSuffixBeta[w.pixelIndex * NSpectrumSamples + c] =
                                 newSuffixBeta[c];
-                            nrcSuffixLocal[(size_t(w.pixelIndex) * kNRCMaxSuffixLen +
+                            nrcSuffixLocal[(size_t(w.pixelIndex) * kNRCSuffixLocalStride +
                                            nextSlot) *
                                                NSpectrumSamples +
                                            c] = 0.f;
@@ -539,6 +557,22 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                                 ? bsdf.PDF<ConcreteBxDF>(wo, bsdfSample->wi)
                                 : bsdfSample->pdf;
                         nrcSuffixLen[w.pixelIndex] = nextSlot;
+                    }
+                    // RR-only suffix continues: no per-vertex slot, no cap,
+                    // no bootstrap -- just fold this vertex's step factor
+                    // into the running nrcSuffixBeta so the NEXT vertex's
+                    // local/NEE contribution (into the shared accumulator
+                    // slot, kNRCMaxSuffixLen) is weighted correctly.
+                    // nrcSuffixLen deliberately stays 0 until the suffix
+                    // finally ends naturally (see the two natural-end blocks
+                    // above), at which point nrcSuffixSlot+1 == 1 finalizes
+                    // exactly one training record.
+                    if (nrcSuffixRR) {
+                        SampledSpectrum suffixStep = bsdfSample->f * AbsDot(wi, ns) /
+                                                     bsdfSample->pdf * nrcSuffixRRFactor;
+                        for (int c = 0; c < NSpectrumSamples; ++c)
+                            nrcSuffixBeta[w.pixelIndex * NSpectrumSamples + c] *=
+                                suffixStep[c];
                     }
 #endif
                 }
@@ -562,7 +596,7 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
             // nrcValid/nrcInputs are no longer used for training paths at
             // all; their supervision comes entirely from the training-suffix
             // mechanism (NRCTrainingSuffixFinish() in integrator.cpp).
-            if (nrcCaptureNow || nrcSuffixTrackThisVertex) {
+            if (nrcCaptureNow || (nrcSuffixTrackThisVertex && !nrcSuffixRR)) {
                 // Albedo: hemispherical-directional reflectance.
                 constexpr int nRhoSamples = 16;
                 const Float ucRho[nRhoSamples] = {
@@ -820,11 +854,23 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                 // vertex's own nrcSuffixLocal slot if the shadow ray turns
                 // out to be unoccluded. Left at zero (a harmless no-op) for
                 // paths that aren't tracking an active, non-bootstrap
-                // training suffix at this vertex.
+                // training suffix at this vertex. For an RR-only suffix,
+                // pre-scaled by the running nrcSuffixBeta (this vertex's
+                // accumulated throughput since the suffix root) and routed
+                // to the reserved accumulator slot (kNRCMaxSuffixLen)
+                // instead of a per-vertex one -- see nrcSuffixRROnly in
+                // integrator.h.
                 SampledSpectrum nrcSuffixLd(0.f);
                 int nrcSuffixSlotForShadowRay = 0;
 #ifdef PBRT_BUILD_NRC
-                if (nrcSuffixTrackThisVertex && !nrcSuffixIsBootstrapVertex) {
+                if (nrcSuffixRR) {
+                    SampledSpectrum contribution = f * AbsDot(wi, ns) * ls->L;
+                    for (int c = 0; c < NSpectrumSamples; ++c)
+                        contribution[c] *=
+                            nrcSuffixBeta[w.pixelIndex * NSpectrumSamples + c];
+                    nrcSuffixLd = contribution;
+                    nrcSuffixSlotForShadowRay = int(kNRCMaxSuffixLen);
+                } else if (nrcSuffixTrackThisVertex && !nrcSuffixIsBootstrapVertex) {
                     nrcSuffixLd = f * AbsDot(wi, ns) * ls->L;
                     nrcSuffixSlotForShadowRay = int(nrcSuffixSlot);
                 }

@@ -327,6 +327,16 @@ class WavefrontPathIntegrator {
     uint8_t *nrcValid = nullptr;
     uint8_t *nrcReachedQueryVertex = nullptr;  // 1 = this path has already found its NRC query vertex
     uint8_t *nrcTrainingPath = nullptr;  // 1 = this path was selected to generate a training record this pass
+    // 1 = this training path was ALSO selected (independently, ~1/16 of
+    // training paths, see GenerateCameraRays()) to produce an "RR-only"
+    // (unbiased/ground-truth) suffix record instead of an ordinary one: no
+    // area-spread heuristic/cap termination and no NN bootstrap query, ever
+    // -- the suffix keeps extending via real bounces (Russian roulette is
+    // still the only thing that can end it) until it dies naturally, and its
+    // single training target is the fully unbiased path-traced continuation.
+    // Meaningless (and unread) for non-training paths. See nrcSuffixRROnly
+    // below for the corresponding suffix-lifetime copy of this flag.
+    uint8_t *nrcUnbiasedTrainingPath = nullptr;
     bool nrcCaptureAll = false;  // true during the final inference sweep: capture every path, ignore selection
     float *nrcCompactInputs  = nullptr;  // valid-only training inputs, compacted each pass
     float *nrcCompactTargets = nullptr;  // valid-only training targets, compacted each pass
@@ -435,14 +445,41 @@ class WavefrontPathIntegrator {
     // here unqualified via ordinary namespace lookup.
     uint8_t *nrcSuffixActive = nullptr;   // 1 = training path is currently in its suffix; cleared once bootstrap-terminated
     uint8_t *nrcSuffixLen = nullptr;      // number of finalized suffix vertices (valid slots 0..nrcSuffixLen-1)
+    // Copied from nrcUnbiasedTrainingPath when the suffix starts (surfscatter.cpp),
+    // constant for the suffix's whole lifetime. When set: the area-spread
+    // heuristic/cap check never runs for this suffix (nrcSuffixIsBootstrapVertex
+    // stays false forever, nrcSuffixTerminatedByHeuristic stays 0), so it is
+    // never bootstrapped by an NN query; the suffix's per-vertex bookkeeping
+    // never advances nrcSuffixLen/nrcSuffixSlot past 0 (there's no per-vertex
+    // storage at all beyond the query vertex's own input row, frozen at slot
+    // 0); instead, every vertex's local emission/NEE contribution is folded
+    // directly (weighted by the running nrcSuffixBeta at that vertex, then
+    // nrcSuffixBeta *= that vertex's step) into nrcSuffixLocal's one reserved
+    // per-pixel accumulator slot (index kNRCMaxSuffixLen, stride
+    // kNRCSuffixLocalStride -- see workitems.h). This sidesteps the
+    // kNRCMaxSuffixLen storage cap entirely (the real path underneath can run
+    // arbitrarily long) without growing that cap for every training path.
+    // NRCTrainingSuffixFinish() detects this flag and, instead of running its
+    // usual backward recursion (which needs real per-vertex local[]/step[]
+    // data this suffix never wrote), copies the accumulator directly into
+    // nrcSuffixTarget's slot 0 -- the suffix's single, already-unbiased
+    // training record.
+    uint8_t *nrcSuffixRROnly = nullptr;
     uint8_t *nrcSuffixTerminatedByHeuristic = nullptr;  // 1 = suffix ended via its own heuristic/cap (needs a bootstrap query); 0 = natural end
-    float *nrcSuffixBeta = nullptr;        // NSpectrumSamples floats/slot: local suffix throughput, reset to 1 at the render-query vertex. Currently write-only/unread (the backward recursion's own step[] chaining handles all throughput compounding) -- kept as harmless bookkeeping, same as nrcSnapshotBeta/L.
+    float *nrcSuffixBeta = nullptr;        // NSpectrumSamples floats/slot: local suffix throughput, reset to 1 at the render-query vertex. For ordinary suffixes this is write-only/unread bookkeeping (the backward recursion's own step[] chaining handles all throughput compounding), same as nrcSnapshotBeta/L. For RR-only suffixes (nrcSuffixRROnly), it IS read: surfscatter.cpp/integrator.cpp pre-scale each vertex's local emission/NEE contribution by it before folding into nrcSuffixLocal's reserved accumulator slot, since those suffixes have no backward recursion to apply throughput compounding for them.
     float *nrcSuffixSpreadAccum = nullptr; // suffix's own independent Eq. 3 accumulator
     float *nrcSuffixA0 = nullptr;          // suffix's own independent Eq. 4 baseline, from the real vertex before the render-query vertex to it
     Point3f *nrcSuffixPrevP = nullptr;     // suffix's own "previous vertex" position, seeded from nrcPathPrevP at the render-query vertex, then evolved independently
     float *nrcSuffixPrevPdf = nullptr;     // suffix's own "previous vertex" pdf, seeded from nrcPathPrevPdf at the render-query vertex, then evolved independently
     float *nrcSuffixInputs = nullptr;      // kNRCMaxSuffixLen*kNRCInputDims floats/slot: per-suffix-vertex input feature rows (incl. the bootstrap-only row)
-    float *nrcSuffixLocal = nullptr;       // kNRCMaxSuffixLen*NSpectrumSamples floats/slot: per-suffix-vertex local (beta=1-frame) emission contribution
+    // NSpectrumSamples floats per slot, kNRCSuffixLocalStride (==
+    // kNRCMaxSuffixLen+1) slots per pixel, NOT kNRCMaxSuffixLen: ordinary
+    // suffixes use slots [0, kNRCMaxSuffixLen) exactly as before (per-vertex
+    // local (beta=1-frame) emission contribution); the one extra slot at
+    // index kNRCMaxSuffixLen is reserved as the running target accumulator
+    // for RR-only ("unbiased") suffixes (see nrcSuffixRROnly above) and is
+    // never touched by ordinary ones.
+    float *nrcSuffixLocal = nullptr;
     float *nrcSuffixStep = nullptr;        // kNRCMaxSuffixLen*NSpectrumSamples floats/slot: per-suffix-vertex step factor (f*cos/pdf) to the next vertex
     float *nrcSuffixTarget = nullptr;      // kNRCMaxSuffixLen*kNRCOutputDims floats/slot: backward-propagated RGB target, filled by NRCTrainingSuffixFinish()
     float *nrcSuffixBootstrapInputs = nullptr;  // nrcBatchSize*kNRCInputDims scratch: bootstrap rows gathered contiguously for one Inference() call

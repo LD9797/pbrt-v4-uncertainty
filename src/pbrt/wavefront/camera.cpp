@@ -98,6 +98,19 @@ void WavefrontPathIntegrator::GenerateCameraRays(int y0, Transform movingFromCam
                                                         (rel.y % tileH) == offsetY);
 
                 nrcTrainingPath[pixelIndex] = isTrainingPath ? 1 : 0;
+
+                // Independently select ~1/16 of ALL paths (not just training
+                // ones -- the flag is only ever read when nrcTrainingPath is
+                // also set, but keeping the selection independent of tile
+                // membership means the RR-only subset isn't biased toward
+                // any particular tile offset) as "RR-only" (unbiased/
+                // ground-truth) training suffixes, hashed on the pixel's
+                // absolute coordinates and sampleIndex rather than
+                // pixelIndex, since pixelIndex is only local to this
+                // scanline band, not stable across bands or samples.
+                if (nrcUnbiasedTrainingPath != nullptr)
+                    nrcUnbiasedTrainingPath[pixelIndex] =
+                        (Hash(pPixel.x, pPixel.y, sampleIndex) & 15u) == 0 ? 1 : 0;
             }
 
             // Prime the area-spread path-termination tracking (Muller et al.
