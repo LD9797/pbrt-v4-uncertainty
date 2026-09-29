@@ -1684,6 +1684,71 @@ void WavefrontPathIntegrator::NRCTrainAccumulatedRecords() {
         if (used > 0 && Options->nrcDebug)
             LogNRCMagnitudeStats("target", nrcCompactTargets, available, (int)kNRCOutputDims);
     }
+
+    // Adapt the training-path selection tile for the NEXT sample based on
+    // how many records this whole SPP actually generated -- never between
+    // scanline bands (this function only runs once per full sample), so
+    // every band within one SPP keeps using identical tile dimensions.
+    NRCUpdateTrainingTile(available);
+}
+
+void WavefrontPathIntegrator::NRCUpdateTrainingTile(uint32_t generatedRecords) {
+    if (generatedRecords == 0)
+        return;
+
+    constexpr float target = float(kNRCTrainingBudget);
+
+    float ratio = float(generatedRecords) / target;
+
+    // Already close enough. Avoid constantly changing tile dimensions.
+    if (ratio >= 1.f - kNRCTileTolerance && ratio <= 1.f + kNRCTileTolerance)
+        return;
+
+    // Don't allow one unusual sample to cause a huge jump.
+    ratio = Clamp(ratio, 0.5f, 2.f);
+
+    float currentArea = float(nrcTrainingTileW * nrcTrainingTileH);
+
+    float desiredArea = currentArea * ratio;
+
+    // Reasonable safety bounds.
+    desiredArea = Clamp(desiredArea, 4.f, 128.f);
+
+    // Find a reasonably shaped integer tile close to desiredArea.
+    int bestW = nrcTrainingTileW;
+    int bestH = nrcTrainingTileH;
+    float bestScore = Infinity;
+
+    for (int h = 1; h <= 16; ++h) {
+        for (int w = h; w <= 32; ++w) {
+            float area = float(w * h);
+
+            float areaError = std::abs(area - desiredArea) / desiredArea;
+
+            // Prefer roughly 2:1 tiles when area is similar.
+            float aspect = float(w) / float(h);
+            float aspectError = std::abs(aspect - 2.f);
+
+            float score = areaError + 0.05f * aspectError;
+
+            if (score < bestScore) {
+                bestScore = score;
+                bestW = w;
+                bestH = h;
+            }
+        }
+    }
+
+    if (Options->nrcDebug) {
+        fprintf(stderr,
+                "NRC TILE: generated=%u target=%u "
+                "old=%dx%d desiredArea=%.2f new=%dx%d\n",
+                generatedRecords, kNRCTrainingBudget, nrcTrainingTileW, nrcTrainingTileH,
+                desiredArea, bestW, bestH);
+    }
+
+    nrcTrainingTileW = bestW;
+    nrcTrainingTileH = bestH;
 }
 
 void WavefrontPathIntegrator::NRCTrainingSuffixFinish() {

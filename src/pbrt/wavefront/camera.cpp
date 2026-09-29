@@ -33,6 +33,16 @@ template <typename ConcreteSampler>
 void WavefrontPathIntegrator::GenerateCameraRays(int y0, Transform movingFromCamera,
                                                  int sampleIndex) {
     RayQueue *rayQueue = CurrentRayQueue(0);
+#ifdef PBRT_BUILD_NRC
+    // Copied to locals so the GPU lambda below captures plain ints rather
+    // than needing to read them back through `this` -- and so a tile
+    // resize by NRCUpdateTrainingTile() (which only ever runs between
+    // samples, at the end of NRCTrainAccumulatedRecords()) can never change
+    // these mid-sample, keeping every scanline band within one sample
+    // using identical tile dimensions.
+    int trainingTileW = nrcTrainingTileW;
+    int trainingTileH = nrcTrainingTileH;
+#endif
     ParallelFor(
         "Generate camera rays", maxQueueSize, PBRT_CPU_GPU_LAMBDA(int pixelIndex) {
             // Enqueue camera ray and set pixel state for sample
@@ -73,8 +83,8 @@ void WavefrontPathIntegrator::GenerateCameraRays(int y0, Transform movingFromCam
 
 #ifdef PBRT_BUILD_NRC
             if (nrcTrainingPath != nullptr) {
-                constexpr int tileW = 8;
-                constexpr int tileH = 4;
+                int tileW = trainingTileW;
+                int tileH = trainingTileH;
 
                 Vector2i rel = pPixel - pixelBounds.pMin;
 

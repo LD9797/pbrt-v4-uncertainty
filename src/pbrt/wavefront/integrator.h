@@ -294,6 +294,17 @@ class WavefrontPathIntegrator {
     static constexpr uint32_t kNRCTrainingBudget =
         kNRCTrainingBatchSize * kNRCTrainingBatches;
 
+    // Dynamic training-path selection tile (GenerateCameraRays() in
+    // camera.cpp): one pixel per tileW*tileH block is chosen as a training
+    // path each sample. NRCUpdateTrainingTile() adapts these dimensions
+    // after each full SPP so the number of generated training records
+    // tracks kNRCTrainingBudget (Muller et al. 2021 Sec. 4.2's "adapt the
+    // tile size" scheme), rather than a fixed tile always over/under
+    // shooting the budget as scene complexity/resolution varies.
+    int nrcTrainingTileW = 5;
+    int nrcTrainingTileH = 4;
+    static constexpr float kNRCTileTolerance = 0.05f;  // +/-5%
+
     // Muller et al. 2021 Sec. 3.4 "Path Termination": all paths are
     // terminated according to the area-spread heuristic below, which picks
     // the query vertex dynamically per path (rather than always the first
@@ -482,6 +493,12 @@ class WavefrontPathIntegrator {
     // Call once per full sample (SPP), after every scanline band has been
     // rendered and accumulated with the same network state.
     void NRCTrainAccumulatedRecords();
+    // Adapts nrcTrainingTileW/H so the next sample's generated training
+    // record count tracks kNRCTrainingBudget. Called once at the end of
+    // NRCTrainAccumulatedRecords(), i.e. once per full SPP -- never between
+    // scanline bands, so every band within one sample keeps using the same
+    // tile dimensions (see the band-coherent update cycle in Render()).
+    void NRCUpdateTrainingTile(uint32_t generatedRecords);
     void NRCInferenceForRenderPaths();
     void NRCTrainingSuffixFinish();
     void NRCDumpPredictedImage(const std::string &filename);
