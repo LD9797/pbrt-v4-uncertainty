@@ -281,7 +281,21 @@ WavefrontPathIntegrator::WavefrontPathIntegrator(
             alloc.new_object<MediumScatterQueue>(maxQueueSize, alloc, havePhase);
     }
 
-    stats = alloc.new_object<Stats>(maxDepth, alloc);
+    // stats->indirectRays/shadowRays are indexed directly by wavefrontDepth
+    // (see the per-sample-band loop below), which can run past maxDepth
+    // whenever NRC training suffixes are active -- up to
+    // maxDepth + kNRCRROnlySuffixDepthCap once warmed up (see that
+    // constant's comment in workitems.h). Size for that worst case so those
+    // writes can never go out of bounds; harmless the rest of the time
+    // (unused depths beyond whatever actually ran just stay at their
+    // zero-initialized count).
+#ifdef PBRT_BUILD_NRC
+    int statsMaxDepth =
+        (Options->useGPU && Options->enableNRC) ? maxDepth + kNRCRROnlySuffixDepthCap : maxDepth;
+#else
+    int statsMaxDepth = maxDepth;
+#endif
+    stats = alloc.new_object<Stats>(statsMaxDepth, alloc);
 
 #ifdef PBRT_BUILD_GPU_RENDERER
     if (Options->useGPU) {
@@ -573,8 +587,20 @@ Float WavefrontPathIntegrator::Render() {
                 // traces to completion for real anyway, so maxDepth already
                 // governs the real image; extending it there too would
                 // silently change --maxdepth semantics for everyone).
-                int maxWavefrontDepth =
-                    (nrcCache && nrcWarmedUp) ? maxDepth + (int)kNRCMaxSuffixLen : maxDepth;
+                //
+                // Sized by kNRCRROnlySuffixDepthCap, not kNRCMaxSuffixLen:
+                // ordinary suffixes still self-limit to kNRCMaxSuffixLen
+                // vertices regardless of this bound (see the
+                // nrcSuffixSlot >= kNRCMaxSuffixLen - 1 check in
+                // surfscatter.cpp), but RR-only ("unbiased") suffixes have
+                // no per-vertex cap at all and must keep running past that
+                // point until Russian roulette actually kills them -- see
+                // kNRCRROnlySuffixDepthCap's comment in workitems.h for why
+                // that's safe to extend this far without growing any
+                // per-vertex GPU storage.
+                int maxWavefrontDepth = (nrcCache && nrcWarmedUp)
+                                            ? maxDepth + kNRCRROnlySuffixDepthCap
+                                            : maxDepth;
 #else
                 int maxWavefrontDepth = maxDepth;
 #endif

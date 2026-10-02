@@ -40,6 +40,33 @@ constexpr uint32_t kNRCMaxSuffixLen = 4;
 // either an ordinary vertex index or this reserved accumulator index.
 constexpr uint32_t kNRCSuffixLocalStride = kNRCMaxSuffixLen + 1;
 
+// How far past maxDepth the GPU wavefront loop (integrator.cpp's
+// per-sample-band `for (wavefrontDepth = 0; true; ...)` loop) is allowed to
+// run so that an RR-only ("unbiased") training suffix -- see
+// nrcSuffixRROnly in integrator.h -- can actually run until Russian
+// roulette kills it, rather than being silently cut short.
+//
+// This is deliberately NOT the same constant as kNRCMaxSuffixLen: that one
+// bounds fixed-size per-vertex GPU storage (nrcSuffixInputs/Step/Target/...),
+// so growing it costs real, permanent GPU memory for every training path,
+// every sample, whether or not any path actually needs it. This constant
+// only bounds loop *iterations* -- an RR-only suffix's real vertices beyond
+// kNRCMaxSuffixLen are never given per-vertex storage at all (they fold
+// straight into nrcSuffixLocal's one reserved accumulator slot, see
+// kNRCSuffixLocalStride above), so extending this costs no extra memory,
+// only (cheap, mostly-empty-queue) extra wavefront-loop passes on the rare
+// samples whose RR-only tail actually runs that long.
+//
+// It's a safety net, not a target: ordinary Russian roulette survival
+// probability shrinks geometrically with path throughput, so in practice an
+// RR-only suffix terminates naturally almost always within a handful of
+// bounces past maxDepth. This cap only guards against the (basically
+// never, but not impossible) case of a path surviving RR unusually long,
+// so the wavefront loop still has a hard upper bound and the render can't
+// hang on a single pathological sample.
+constexpr int kNRCRROnlySuffixDepthCap = 32;
+
+
 // RaySamples Definition
 struct RaySamples {
     // RaySamples Public Members
