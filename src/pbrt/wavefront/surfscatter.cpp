@@ -465,9 +465,30 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                         nrcSuffixActive[w.pixelIndex] = 0;
                     }
                 }
+
+                // maxWavefrontDepth (Render()) now extends all the way to
+                // maxDepth + kNRCRROnlySuffixDepthCap so that an RR-only
+                // suffix can run until Russian roulette actually kills it
+                // (see that constant's comment in workitems.h) -- but the
+                // global wavefront loop has no way to tell suffix types
+                // apart, so without this check EVERY path still alive past
+                // that depth would keep spawning real indirect rays for
+                // free, not just RR-only ones. Past the OLD ordinary-suffix
+                // limit (maxDepth + kNRCMaxSuffixLen), only an active
+                // RR-only suffix (nrcSuffixRR) may continue: normal renders
+                // are already stopped earlier by nrcTerminateAndSubstitute,
+                // and an ordinary training suffix's own tracking is already
+                // finished by kNRCMaxSuffixLen vertices in regardless (see
+                // the heuristic/cap block above) -- its real path has no
+                // business running any longer than it used to just because
+                // the global cap grew to accommodate RR-only suffixes.
+                bool allowNRCContinuation =
+                    w.depth < maxDepth + (int)kNRCMaxSuffixLen || nrcSuffixRR;
+#else
+                bool allowNRCContinuation = true;
 #endif
 
-                if (beta) {
+                if (beta && allowNRCContinuation) {
                     // Initialize spawned ray and enqueue for next ray depth
                     if (bsdfSample->IsTransmission() &&
                         w.material->HasSubsurfaceScattering()) {
