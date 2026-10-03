@@ -482,7 +482,18 @@ class WavefrontPathIntegrator {
     float *nrcSuffixLocal = nullptr;
     float *nrcSuffixStep = nullptr;        // kNRCMaxSuffixLen*NSpectrumSamples floats/slot: per-suffix-vertex step factor (f*cos/pdf) to the next vertex
     float *nrcSuffixTarget = nullptr;      // kNRCMaxSuffixLen*kNRCOutputDims floats/slot: backward-propagated RGB target, filled by NRCTrainingSuffixFinish()
-    float *nrcSuffixBootstrapInputs = nullptr;  // nrcBatchSize*kNRCInputDims scratch: bootstrap rows gathered contiguously for one Inference() call
+    float *nrcSuffixBootstrapInputs = nullptr;  // nrcBatchSize*kNRCInputDims scratch: bootstrap rows gathered contiguously (compacted -- only heuristic-terminated suffixes get a row) for one InferenceN() call
+    // Maps a pixel index to its row in the compacted bootstrap batch above
+    // (nrcSuffixBootstrapInputs/nrcInferenceOutputs), valid only for pixels
+    // with nrcSuffixTerminatedByHeuristic[i] set this pass. Filled by the
+    // compacting ParallelFor in NRCTrainingSuffixFinish(); read back by that
+    // same function's backward-recursion pass (and its --nrc-debug trace)
+    // to find a given pixel's bootstrap prediction row.
+    uint32_t *nrcSuffixBootstrapIndex = nullptr;
+    // Single managed counter used while compacting nrcSuffixBootstrapInputs
+    // on GPU (atomicAdd'd once per heuristic-terminated suffix); reset to 0
+    // before each compacting pass.
+    uint32_t *nrcSuffixBootstrapCount = nullptr;
     uint32_t nrcCompactCapacity = 0;       // capacity of nrcCompactInputs/nrcCompactTargets in rows (>= nPasses * nrcBatchSize to allow room for suffix records across every scanline band in a full sample)
     // Running count of valid rows written into nrcCompactInputs/Targets/Aux
     // so far this sample (i.e. across all scanline bands rendered with the

@@ -40,6 +40,12 @@ class NeuralRadianceCache {
     // Forward pass only. Writes nOutputDims*batchSize floats into dOutputs.
     void Inference(const float *dInputs, float *dOutputs);
 
+    // Forward pass over only the first n rows of dInputs/dOutputs (n must
+    // be a multiple of tcnn's batch granularity, see RoundUpBatch). Lets
+    // callers run inference over a compacted sub-batch instead of the full
+    // batchSize when only a fraction of rows actually need a prediction.
+    void InferenceN(const float *dInputs, float *dOutputs, uint32_t n);
+
     size_t NumParams() const;
 
     uint32_t BatchSize() const { return batchSize; }

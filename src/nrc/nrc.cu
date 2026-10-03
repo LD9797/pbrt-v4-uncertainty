@@ -92,9 +92,24 @@ float NeuralRadianceCache::TrainN(const float *dInputs, const float *dTargets,
 
 // Forward pass only. Writes nOutputDims*batchSize floats into dOutputs.
 void NeuralRadianceCache::Inference(const float *dInputs, float *dOutputs) {
-    tcnn::GPUMatrix<float> inputs(const_cast<float *>(dInputs), nInputDims,
-                                  batchSize);
-    tcnn::GPUMatrix<float> outputs(dOutputs, nOutputDims, batchSize);
+    InferenceN(dInputs, dOutputs, batchSize);
+}
+
+// Forward pass over only the first n rows of dInputs/dOutputs.
+void NeuralRadianceCache::InferenceN(const float *dInputs, float *dOutputs,
+                                      uint32_t n) {
+    if (n == 0)
+        return;
+
+    if (n > batchSize)
+        throw std::runtime_error("NRC InferenceN: n exceeds batchSize");
+
+    if (n % tcnn::batch_size_granularity != 0)
+        throw std::runtime_error(
+            "NRC InferenceN: n must be rounded to tcnn batch granularity");
+
+    tcnn::GPUMatrix<float> inputs(const_cast<float *>(dInputs), nInputDims, n);
+    tcnn::GPUMatrix<float> outputs(dOutputs, nOutputDims, n);
     impl->model.network->inference(inputs, outputs);
 }
 
