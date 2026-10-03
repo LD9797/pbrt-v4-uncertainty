@@ -2088,8 +2088,8 @@ void WavefrontPathIntegrator::NRCInferenceForRenderPaths() {
     // debug sweep: harmless for slots that aren't a render query this pass,
     // since those are filtered out below via nrcRenderQuery.
     nrcCache->Inference(nrcInputs, nrcInferenceOutputs);
-    // cudaDeviceSynchronize(); TEMP removal
-
+    cudaDeviceSynchronize(); 
+    
     const uint8_t *renderQuery = nrcRenderQuery;
     const float *outputs = nrcInferenceOutputs;
     const float *snapshotBeta = nrcSnapshotBeta;
