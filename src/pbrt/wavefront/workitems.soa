@@ -80,6 +80,8 @@ soa ShadowRayWorkItem {
     SampledWavelengths lambda;
     SampledSpectrum Ld, r_u, r_l;
     int pixelIndex;
+    SampledSpectrum nrcSuffixLd;
+    int nrcSuffixSlot;
 };
 
 soa GetBSSRDFAndProbeRayWorkItem {

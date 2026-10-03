@@ -8,6 +8,7 @@
 #include <pbrt/options.h>
 #include <pbrt/samplers.h>
 #include <pbrt/util/bluenoise.h>
+#include <pbrt/util/hash.h>
 #include <pbrt/util/spectrum.h>
 #include <pbrt/util/vecmath.h>
 #include <pbrt/wavefront/integrator.h>
@@ -32,6 +33,16 @@ template <typename ConcreteSampler>
 void WavefrontPathIntegrator::GenerateCameraRays(int y0, Transform movingFromCamera,
                                                  int sampleIndex) {
     RayQueue *rayQueue = CurrentRayQueue(0);
+#ifdef PBRT_BUILD_NRC
+    // Copied to locals so the GPU lambda below captures plain ints rather
+    // than needing to read them back through `this` -- and so a tile
+    // resize by NRCUpdateTrainingTile() (which only ever runs between
+    // samples, at the end of NRCTrainAccumulatedRecords()) can never change
+    // these mid-sample, keeping every scanline band within one sample
+    // using identical tile dimensions.
+    int trainingTileW = nrcTrainingTileW;
+    int trainingTileH = nrcTrainingTileH;
+#endif
     ParallelFor(
         "Generate camera rays", maxQueueSize, PBRT_CPU_GPU_LAMBDA(int pixelIndex) {
             // Enqueue camera ray and set pixel state for sample
@@ -69,6 +80,46 @@ void WavefrontPathIntegrator::GenerateCameraRays(int y0, Transform movingFromCam
             pixelSampleState.filterWeight[pixelIndex] = cameraSample.filterWeight;
             if (initializeVisibleSurface)
                 pixelSampleState.visibleSurface[pixelIndex] = VisibleSurface();
+
+#ifdef PBRT_BUILD_NRC
+            if (nrcTrainingPath != nullptr) {
+                int tileW = trainingTileW;
+                int tileH = trainingTileH;
+
+                Vector2i rel = pPixel - pixelBounds.pMin;
+
+                // One global offset for all tiles in this sample.
+                uint32_t offset = Hash(sampleIndex) % (tileW * tileH);
+
+                int offsetX = int(offset % tileW);
+                int offsetY = int(offset / tileW);
+
+                bool isTrainingPath = nrcCaptureAll || ((rel.x % tileW) == offsetX &&
+                                                        (rel.y % tileH) == offsetY);
+
+                nrcTrainingPath[pixelIndex] = isTrainingPath ? 1 : 0;
+
+                // Independently select ~1/16 of ALL paths (not just training
+                // ones -- the flag is only ever read when nrcTrainingPath is
+                // also set, but keeping the selection independent of tile
+                // membership means the RR-only subset isn't biased toward
+                // any particular tile offset) as "RR-only" (unbiased/
+                // ground-truth) training suffixes, hashed on the pixel's
+                // absolute coordinates and sampleIndex rather than
+                // pixelIndex, since pixelIndex is only local to this
+                // scanline band, not stable across bands or samples.
+                if (nrcUnbiasedTrainingPath != nullptr)
+                    nrcUnbiasedTrainingPath[pixelIndex] =
+                        (Hash(pPixel.x, pPixel.y, sampleIndex) & 15u) == 0 ? 1 : 0;
+            }
+
+            // Prime the area-spread path-termination tracking (Muller et al.
+            // 2021, Eq. 3-4): x0 is the camera vertex, needed to compute the
+            // Eq. 4 baseline a0 once the primary vertex x1 is hit.
+            if (nrcPathPrevP != nullptr && cameraRay)
+                nrcPathPrevP[pixelIndex] = cameraRay->ray.o;
+
+#endif
 
             // Enqueue camera ray for intersection tests
             if (cameraRay) {
