@@ -808,7 +808,7 @@ Float WavefrontPathIntegrator::Render() {
             EvaluateMaterialsAndBSDFs(0, Transform{});
             cudaDeviceSynchronize();
             nrcCache->Inference(nrcInputs, nrcInferenceOutputs);
-            cudaDeviceSynchronize();
+            // cudaDeviceSynchronize(); TEMP removal
 
             const uint8_t *valid   = nrcValid;
             float         *predImg = nrcPredictedRGB;
