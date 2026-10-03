@@ -2089,7 +2089,7 @@ void WavefrontPathIntegrator::NRCInferenceForRenderPaths() {
     // since those are filtered out below via nrcRenderQuery.
     nrcCache->Inference(nrcInputs, nrcInferenceOutputs);
     cudaDeviceSynchronize(); 
-    
+
     const uint8_t *renderQuery = nrcRenderQuery;
     const float *outputs = nrcInferenceOutputs;
     const float *snapshotBeta = nrcSnapshotBeta;
@@ -2130,12 +2130,19 @@ void WavefrontPathIntegrator::NRCInferenceForRenderPaths() {
         });
     // cudaDeviceSynchronize(); TEMP removal
 
-    if (Options->nrcDebug && nrcWarmedUp && (nrcSampleCounter & 31) == 0)
+    // Debug-only: the CPU reads of nrcRenderQuery/nrcRenderQueryDepth/
+    // nrcInferenceOutputs below need the substitution kernel's writes (and
+    // anything still in flight before it) to be visible first. Keeping this
+    // sync scoped to the debug path means normal (non-debug) performance is
+    // untouched.
+    if (Options->nrcDebug && nrcWarmedUp && (nrcSampleCounter & 31) == 0) {
+        cudaDeviceSynchronize();
+
         LogNRCQueryDepthHistogram(nrcRenderQuery, nrcRenderQueryDepth, nrcBatchSize);
 
-    if (Options->nrcDebug && nrcWarmedUp && (nrcSampleCounter & 31) == 0)
         LogNRCMagnitudeStats("prediction", nrcInferenceOutputs, nrcBatchSize,
                              (int)kNRCOutputDims, nrcRenderQuery);
+    }
 }
 
 void WavefrontPathIntegrator::NRCDumpPredictedImage(const std::string &filename) {
