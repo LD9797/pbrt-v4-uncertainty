@@ -504,6 +504,13 @@ class WavefrontPathIntegrator {
     // call. This is what makes one NRC network update cover a whole SPP
     // instead of one update per scanline band.
     uint32_t nrcAccumulatedRecords = 0;
+    // Single managed counter: GPU-resident atomic mirror of
+    // nrcAccumulatedRecords, used by NRCAccumulateTrainingRecords()'s
+    // compaction kernels (atomicAdd'd once per valid record). Seeded from
+    // nrcAccumulatedRecords at the start of each call so records already
+    // compacted by earlier scanline bands this sample are preserved, then
+    // read back afterward to update nrcAccumulatedRecords.
+    uint32_t *nrcAccumulatedRecordsCounter = nullptr;
     // Shuffled-and-selected training records for this sample, gathered from
     // nrcCompactInputs/Targets/Aux by NRCTrainAccumulatedRecords(); holds at
     // most kNRCTrainingBudget rows, laid out as kNRCTrainingBatches

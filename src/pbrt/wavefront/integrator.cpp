@@ -360,6 +360,8 @@ WavefrontPathIntegrator::WavefrontPathIntegrator(
                           sizeof(float) * 2 * kNRCOutputDims * nrcCompactCapacity);
         cudaMemset(nrcCompactAux, 0,
                    sizeof(float) * 2 * kNRCOutputDims * nrcCompactCapacity);
+        cudaMallocManaged(&nrcAccumulatedRecordsCounter, sizeof(uint32_t));
+        cudaMemset(nrcAccumulatedRecordsCounter, 0, sizeof(uint32_t));
         // Fixed-budget shuffled training buffers (see
         // NRCTrainAccumulatedRecords()): kNRCTrainingBatches slots of
         // kNRCTrainingBatchSize rows each, gathered fresh from
@@ -1559,77 +1561,128 @@ void WavefrontPathIntegrator::NRCAccumulateTrainingRecords() {
     if (!nrcCache)
         return;
     // Ensure all device writes (first-hit capture in surfscatter, target RGB
-    // capture in UpdateFilm) are visible before the memcpy's below read them.
+    // capture in UpdateFilm) are visible before the compaction kernels below
+    // read them.
     cudaDeviceSynchronize();
 
-    // Compact this band's valid records into a contiguous prefix of
-    // nrcCompactInputs/Targets/Aux, appending after whatever earlier bands
-    // this sample already wrote (nrcAccumulatedRecords) so tcnn never sees
-    // the zero-padded invalid slots and every band's records survive to the
-    // single end-of-sample training step.
-    uint32_t nValid = nrcAccumulatedRecords;
-    for (uint32_t i = 0; i < nrcBatchSize && nValid < nrcCompactCapacity; ++i) {
-        if (!nrcValid[i]) continue;
-        std::memcpy(nrcCompactInputs  + nValid * kNRCInputDims,
-                    nrcInputs          + i      * kNRCInputDims,
-                    kNRCInputDims * sizeof(float));
-        float *dst = nrcCompactTargets + nValid * kNRCOutputDims;
-        const float *src = nrcTargets   + i      * kNRCOutputDims;
-        for (uint32_t c = 0; c < kNRCOutputDims; ++c)
-            dst[c] = std::max(0.f, src[c]); //dst[c] = std::log1p(std::max(0.f, src[c]));  // clamp: ToOutputRGB can return negative for out-of-gamut spectra
-        float *dstAux = nrcCompactAux + nValid * (2 * kNRCOutputDims);
-        const float *rSrc = nrcReflectance + size_t(i) * NSpectrumSamples;
-        const float *wSrc = nrcChannelWeight + size_t(i) * NSpectrumSamples;
-        for (uint32_t c = 0; c < kNRCOutputDims; ++c) {
-            // Same 1e-3 floor NRCTrainAccumulatedRecords' render substitution and
-            // NRCTrainingSuffixFinish's bootstrap seed apply to reflectance
-            // before multiplying it by the network's raw output -- training
-            // must reconstruct L_hat_s = R*q with the exact same R contract
-            // those two use, or the loss trains against a value inference
-            // never actually reproduces whenever R < 1e-3.
-            dstAux[c] = std::max(rSrc[c], 1e-3f);
-            dstAux[kNRCOutputDims + c] = wSrc[c];
-        }
-        ++nValid;
-    }
+    // Seed the GPU-resident cursor with whatever earlier bands this sample
+    // already wrote, so this band's records are appended after theirs
+    // rather than overwriting them.
+    *nrcAccumulatedRecordsCounter = nrcAccumulatedRecords;
+
+    uint32_t *nValidCounter = nrcAccumulatedRecordsCounter;
+    const uint32_t capacity = nrcCompactCapacity;
+    const uint8_t *valid = nrcValid;
+    const float *inputs = nrcInputs;
+    const float *targets = nrcTargets;
+    const float *reflectance = nrcReflectance;
+    const float *channelWeight = nrcChannelWeight;
+    float *compactInputs = nrcCompactInputs;
+    float *compactTargets = nrcCompactTargets;
+    float *compactAux = nrcCompactAux;
+    const uint32_t batch = nrcBatchSize;
+
+    // Compact this band's valid first-hit records into a contiguous prefix
+    // of nrcCompactInputs/Targets/Aux, appending after whatever earlier
+    // bands this sample already wrote so tcnn never sees the zero-padded
+    // invalid slots and every band's records survive to the single
+    // end-of-sample training step.
+    ParallelFor(
+        "NRC compact training records", batch, PBRT_CPU_GPU_LAMBDA(int i) {
+            if (!valid[i])
+                return;
+
+            uint32_t dst;
+#ifdef PBRT_IS_GPU_CODE
+            dst = atomicAdd(nValidCounter, 1u);
+#else
+            dst = (*nValidCounter)++;
+#endif
+            if (dst >= capacity)
+                return;
+
+            const float *srcIn = inputs + size_t(i) * kNRCInputDims;
+            float *dstIn = compactInputs + size_t(dst) * kNRCInputDims;
+            for (uint32_t c = 0; c < kNRCInputDims; ++c)
+                dstIn[c] = srcIn[c];
+
+            const float *src = targets + size_t(i) * kNRCOutputDims;
+            float *dst_ = compactTargets + size_t(dst) * kNRCOutputDims;
+            const float *rSrc = reflectance + size_t(i) * NSpectrumSamples;
+            const float *wSrc = channelWeight + size_t(i) * NSpectrumSamples;
+            float *dstAux = compactAux + size_t(dst) * (2 * kNRCOutputDims);
+            for (uint32_t c = 0; c < kNRCOutputDims; ++c) {
+                dst_[c] = std::max(0.f, src[c]);
+                // Same 1e-3 floor NRCTrainAccumulatedRecords' render substitution and
+                // NRCTrainingSuffixFinish's bootstrap seed apply to reflectance
+                // before multiplying it by the network's raw output -- training
+                // must reconstruct L_hat_s = R*q with the exact same R contract
+                // those two use, or the loss trains against a value inference
+                // never actually reproduces whenever R < 1e-3.
+                dstAux[c] = std::max(rSrc[c], 1e-3f);
+                dstAux[kNRCOutputDims + c] = wSrc[c];
+            }
+        });
+
     // Training-suffix records: each training path can contribute up to
     // kNRCMaxSuffixLen records (one per finalized suffix vertex), already
     // backward-propagated and RGB-converted by NRCTrainingSuffixFinish().
-    for (uint32_t i = 0; i < nrcBatchSize && nValid < nrcCompactCapacity; ++i) {
-        uint32_t m = nrcSuffixLen[i];
-        for (uint32_t s = 0; s < m && nValid < nrcCompactCapacity; ++s) {
-            std::memcpy(nrcCompactInputs + nValid * kNRCInputDims,
-                        nrcSuffixInputs + (size_t(i) * kNRCMaxSuffixLen + s) * kNRCInputDims,
-                        kNRCInputDims * sizeof(float));
-            float *dst = nrcCompactTargets + nValid * kNRCOutputDims;
-            const float *src =
-                nrcSuffixTarget + (size_t(i) * kNRCMaxSuffixLen + s) * kNRCOutputDims;
-            // Target stays raw Ls (no reflectance division): Muller et
-            // al.'s relative loss (Eq. 5) is defined on Ls and the actual
-            // radiance prediction L_hat_s = R*q, not on the raw network
-            // output q alone -- SpectralRelativeL2Loss (see
-            // spectral_relative_l2.h) does the R multiply internally,
-            // using the reflectance/weight aux below.
-            for (uint32_t c = 0; c < kNRCOutputDims; ++c)
-                dst[c] = std::max(0.f, src[c]);
-            float *dstAux = nrcCompactAux + nValid * (2 * kNRCOutputDims);
-            const float *reflectance =
-                nrcSuffixReflectance + (size_t(i) * kNRCMaxSuffixLen + s) * NSpectrumSamples;
-            const float *chanWeight =
-                nrcSuffixChannelWeight +
-                    (size_t(i) * kNRCMaxSuffixLen + s) * NSpectrumSamples;
-            for (uint32_t c = 0; c < kNRCOutputDims; ++c) {
-                // Same 1e-3 floor as the non-suffix branch above (and as
-                // render substitution/bootstrap) -- keeps R's contract
-                // identical everywhere it's used to reconstruct L_hat_s = R*q.
-                dstAux[c] = std::max(reflectance[c], 1e-3f);
-                dstAux[kNRCOutputDims + c] = chanWeight[c];
-            }
-            ++nValid;
-        }
-    }
+    const uint8_t *suffixLen = nrcSuffixLen;
+    const float *suffixInputs = nrcSuffixInputs;
+    const float *suffixTarget = nrcSuffixTarget;
+    const float *suffixReflectance = nrcSuffixReflectance;
+    const float *suffixChannelWeight = nrcSuffixChannelWeight;
 
-    nrcAccumulatedRecords = nValid;
+    ParallelFor(
+        "NRC compact suffix training records", batch, PBRT_CPU_GPU_LAMBDA(int i) {
+            uint32_t m = suffixLen[i];
+            for (uint32_t s = 0; s < m; ++s) {
+                uint32_t dst;
+#ifdef PBRT_IS_GPU_CODE
+                dst = atomicAdd(nValidCounter, 1u);
+#else
+                dst = (*nValidCounter)++;
+#endif
+                if (dst >= capacity)
+                    break;
+
+                const float *srcIn =
+                    suffixInputs + (size_t(i) * kNRCMaxSuffixLen + s) * kNRCInputDims;
+                float *dstIn = compactInputs + size_t(dst) * kNRCInputDims;
+                for (uint32_t c = 0; c < kNRCInputDims; ++c)
+                    dstIn[c] = srcIn[c];
+
+                // Target stays raw Ls (no reflectance division): Muller et
+                // al.'s relative loss (Eq. 5) is defined on Ls and the actual
+                // radiance prediction L_hat_s = R*q, not on the raw network
+                // output q alone -- SpectralRelativeL2Loss (see
+                // spectral_relative_l2.h) does the R multiply internally,
+                // using the reflectance/weight aux below.
+                const float *src =
+                    suffixTarget + (size_t(i) * kNRCMaxSuffixLen + s) * kNRCOutputDims;
+                float *dst_ = compactTargets + size_t(dst) * kNRCOutputDims;
+                const float *refl =
+                    suffixReflectance + (size_t(i) * kNRCMaxSuffixLen + s) * NSpectrumSamples;
+                const float *chanW =
+                    suffixChannelWeight +
+                        (size_t(i) * kNRCMaxSuffixLen + s) * NSpectrumSamples;
+                float *dstAux = compactAux + size_t(dst) * (2 * kNRCOutputDims);
+                for (uint32_t c = 0; c < kNRCOutputDims; ++c) {
+                    dst_[c] = std::max(0.f, src[c]);
+                    // Same 1e-3 floor as the non-suffix branch above (and as
+                    // render substitution/bootstrap) -- keeps R's contract
+                    // identical everywhere it's used to reconstruct L_hat_s = R*q.
+                    dstAux[c] = std::max(refl[c], 1e-3f);
+                    dstAux[kNRCOutputDims + c] = chanW[c];
+                }
+            }
+        });
+
+    // The CPU needs the final count to know how many rows
+    // NRCTrainAccumulatedRecords() has to shuffle/select from.
+    cudaDeviceSynchronize();
+
+    nrcAccumulatedRecords = std::min(*nrcAccumulatedRecordsCounter, capacity);
 }
 
 void WavefrontPathIntegrator::NRCTrainAccumulatedRecords() {
