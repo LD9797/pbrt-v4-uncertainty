@@ -2082,15 +2082,13 @@ void WavefrontPathIntegrator::NRCInferenceForRenderPaths() {
     
     // Ensure surfscatter.cpp's feature-row and snapshot writes for this pass
     // are visible before tcnn reads nrcInputs.
-    cudaDeviceSynchronize();
+    // cudaDeviceSynchronize(); TEMP removal
 
     // Inference runs over the whole (uncompacted) batch, same as the final
     // debug sweep: harmless for slots that aren't a render query this pass,
     // since those are filtered out below via nrcRenderQuery.
     nrcCache->Inference(nrcInputs, nrcInferenceOutputs);
     cudaDeviceSynchronize();
-
-    return; // TEMP
 
     const uint8_t *renderQuery = nrcRenderQuery;
     const float *outputs = nrcInferenceOutputs;
@@ -2130,7 +2128,7 @@ void WavefrontPathIntegrator::NRCInferenceForRenderPaths() {
             SampledSpectrum Lprev = psState->L[i];
             psState->L[i] = Lprev + beta * predicted;
         });
-    cudaDeviceSynchronize();
+    // cudaDeviceSynchronize(); TEMP removal
 
     if (Options->nrcDebug && nrcWarmedUp && (nrcSampleCounter & 31) == 0)
         LogNRCQueryDepthHistogram(nrcRenderQuery, nrcRenderQueryDepth, nrcBatchSize);
