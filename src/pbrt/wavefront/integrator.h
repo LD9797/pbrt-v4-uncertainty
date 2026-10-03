@@ -343,13 +343,6 @@ class WavefrontPathIntegrator {
     float *nrcInferenceOutputs = nullptr;  // scratch for per-step inference
     uint8_t *nrcRenderQuery = nullptr;   // 1 = non-training path terminated at its query vertex this pass; needs cache substitution
     uint8_t *nrcRenderQueryDepth = nullptr;  // w.depth at the render-query vertex, valid wherever nrcRenderQuery == 1; diagnostic-only (query-depth histogram)
-    // nrcBatchSize-slot scratch mapping compacted render-query row j ->
-    // original pixel/slot index, filled by NRCInferenceForRenderPaths()'s
-    // compaction pass; only entries [0, *nrcRenderQueryCount) are valid.
-    uint32_t *nrcRenderCompactToPixel = nullptr;
-    // Single managed counter: number of render queries compacted this pass
-    // by NRCInferenceForRenderPaths(). Reset to 0 at the start of each call.
-    uint32_t *nrcRenderQueryCount = nullptr;
     float *nrcSnapshotBeta = nullptr;    // NSpectrumSamples floats/slot: path throughput arriving at the query vertex
     float *nrcSnapshotL = nullptr;       // NSpectrumSamples floats/slot: L accumulated strictly before the query vertex's own shading
     // Spectral hemispherical-directional reflectance (bsdf.rho()) at the

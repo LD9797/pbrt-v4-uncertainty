@@ -376,18 +376,12 @@ WavefrontPathIntegrator::WavefrontPathIntegrator(
                    sizeof(float) * kNRCOutputDims * nrcBatchSize);
         cudaMallocManaged(&nrcRenderQuery, sizeof(uint8_t) * nrcBatchSize);
         cudaMallocManaged(&nrcRenderQueryDepth, sizeof(uint8_t) * nrcBatchSize);
-        cudaMallocManaged(&nrcRenderCompactToPixel,
-                          sizeof(uint32_t) * nrcBatchSize);
-        cudaMallocManaged(&nrcRenderQueryCount, sizeof(uint32_t));
         cudaMallocManaged(&nrcSnapshotBeta,
                           sizeof(float) * NSpectrumSamples * nrcBatchSize);
         cudaMallocManaged(&nrcSnapshotL,
                           sizeof(float) * NSpectrumSamples * nrcBatchSize);
         cudaMemset(nrcRenderQuery, 0, sizeof(uint8_t) * nrcBatchSize);
         cudaMemset(nrcRenderQueryDepth, 0, sizeof(uint8_t) * nrcBatchSize);
-        cudaMemset(nrcRenderCompactToPixel, 0,
-                   sizeof(uint32_t) * nrcBatchSize);
-        cudaMemset(nrcRenderQueryCount, 0, sizeof(uint32_t));
         cudaMemset(nrcSnapshotBeta, 0,
                    sizeof(float) * NSpectrumSamples * nrcBatchSize);
         cudaMemset(nrcSnapshotL, 0,
@@ -2085,124 +2079,64 @@ void WavefrontPathIntegrator::NRCInferenceForRenderPaths() {
     // wasted work with no consumer for its output.
     if (!nrcCache || !nrcWarmedUp)
         return;
-
-    // Reuse the suffix-bootstrap input buffer here.
-    // NRCTrainingSuffixFinish() won't use it until later.
-    float *compactInputs = nrcSuffixBootstrapInputs;
-
-    uint32_t *compactToPixel = nrcRenderCompactToPixel;
-    uint32_t *queryCount = nrcRenderQueryCount;
-
-    const uint8_t *renderQuery = nrcRenderQuery;
-    const float *inputs = nrcInputs;
-    const uint32_t batch = nrcBatchSize;
-
+    
+    return; 
     // Ensure surfscatter.cpp's feature-row and snapshot writes for this pass
     // are visible before tcnn reads nrcInputs.
     cudaDeviceSynchronize();
 
-    cudaMemset(queryCount, 0, sizeof(uint32_t));
-
-    // ---------------------------------------------------------
-    // 1. Compact only actual render queries
-    // ---------------------------------------------------------
-    ParallelFor(
-        "NRC compact render queries", batch, PBRT_CPU_GPU_LAMBDA(int i) {
-            if (!renderQuery[i])
-                return;
-
-            uint32_t dst;
-#ifdef PBRT_IS_GPU_CODE
-            dst = atomicAdd(queryCount, 1u);
-#else
-            dst = (*queryCount)++;
-#endif
-
-            compactToPixel[dst] = i;
-
-            const float *src = inputs + size_t(i) * kNRCInputDims;
-            float *out = compactInputs + size_t(dst) * kNRCInputDims;
-            for (int d = 0; d < (int)kNRCInputDims; ++d)
-                out[d] = src[d];
-        });
-
-    // We need the count on the CPU to know how much tcnn work to launch.
+    // Inference runs over the whole (uncompacted) batch, same as the final
+    // debug sweep: harmless for slots that aren't a render query this pass,
+    // since those are filtered out below via nrcRenderQuery.
+    nrcCache->Inference(nrcInputs, nrcInferenceOutputs);
     cudaDeviceSynchronize();
 
-    uint32_t nQueries = *queryCount;
-
-    if (nQueries == 0)
-        return;
-
-    // ---------------------------------------------------------
-    // 2. Round for tiny-cuda-nn
-    // ---------------------------------------------------------
-    uint32_t inferBatch = nrc::NeuralRadianceCache::RoundUpBatch(nQueries);
-
-    if (inferBatch > nQueries) {
-        cudaMemset(compactInputs + size_t(nQueries) * kNRCInputDims, 0,
-                   size_t(inferBatch - nQueries) * kNRCInputDims * sizeof(float));
-    }
-
-    // ---------------------------------------------------------
-    // 3. Infer ONLY compacted queries
-    // ---------------------------------------------------------
-    nrcCache->InferenceN(compactInputs, nrcInferenceOutputs, inferBatch);
-    cudaDeviceSynchronize();
-
-    // ---------------------------------------------------------
-    // 4. Scatter predictions back to original pixels
-    // ---------------------------------------------------------
-    // The network predicts a factored quantity q at the query vertex, at
-    // this path's own sampled wavelengths (see the input row's wavelength
-    // dims in surfscatter.cpp) -- independent of any particular path's
-    // history. The suffix training targets it is trained against are raw
-    // (un-factored) Ls; the R = alpha+beta reflectance factorization
-    // happens inside the SpectralRelativeL2 loss itself
-    // (spectral_relative_l2.h), which reconstructs L_hat_s = R*q before
-    // comparing it to Ls. Multiplying back by the same spectral
-    // reflectance here recovers that same predicted scattered radiance;
-    // that must then be weighted by the real prefix throughput that got
-    // this path to the query vertex (nrcSnapshotBeta, captured at that
-    // vertex in surfscatter.cpp), the same way a real continuation ray's
-    // radiance would be.
+    const uint8_t *renderQuery = nrcRenderQuery;
     const float *outputs = nrcInferenceOutputs;
     const float *snapshotBeta = nrcSnapshotBeta;
     const float *reflectance = nrcReflectance;
     auto *psState = &pixelSampleState;
-
+    const uint32_t batch = nrcBatchSize;
     ParallelFor(
-        "NRC compact render substitution", nQueries, PBRT_CPU_GPU_LAMBDA(int j) {
-            uint32_t i = compactToPixel[j];
-
+        "NRC render substitution", batch, PBRT_CPU_GPU_LAMBDA(int i) {
+            if (!renderQuery[i])
+                return;
+            // The network predicts a factored quantity q at the query
+            // vertex, at this path's own sampled wavelengths (see the input
+            // row's wavelength dims in surfscatter.cpp) -- independent of
+            // any particular path's history. The suffix training targets it
+            // is trained against are raw (un-factored) Ls; the R = alpha+beta
+            // reflectance factorization happens inside the SpectralRelativeL2
+            // loss itself (spectral_relative_l2.h), which reconstructs
+            // L_hat_s = R*q before comparing it to Ls. Multiplying back by
+            // the same spectral reflectance here recovers that same
+            // predicted scattered radiance; that must then be weighted by
+            // the real prefix throughput that got this path to the query
+            // vertex (nrcSnapshotBeta, captured at that vertex in
+            // surfscatter.cpp), the same way a real continuation ray's
+            // radiance would be.
             SampledSpectrum predicted;
             for (int c = 0; c < NSpectrumSamples; ++c) {
                 float networkValue =
-                    std::max(0.f, outputs[size_t(j) * kNRCOutputDims + c]);
-                float r =
-                    std::max(reflectance[size_t(i) * NSpectrumSamples + c], 1e-3f);
+                    std::max(0.f, outputs[i * (int)kNRCOutputDims + c]);
+                float r = std::max(reflectance[i * NSpectrumSamples + c], 1e-3f);
                 predicted[c] = networkValue * r;
             }
-
             SampledSpectrum beta;
             for (int c = 0; c < NSpectrumSamples; ++c)
-                beta[c] = snapshotBeta[size_t(i) * NSpectrumSamples + c];
+                beta[c] = snapshotBeta[i * NSpectrumSamples + c];
 
-            psState->L[i] = psState->L[i] + beta * predicted;
+            SampledSpectrum Lprev = psState->L[i];
+            psState->L[i] = Lprev + beta * predicted;
         });
     cudaDeviceSynchronize();
 
-    // ---------------------------------------------------------
-    // Debug only
-    // ---------------------------------------------------------
-    if (Options->nrcDebug && (nrcSampleCounter & 31) == 0) {
+    if (Options->nrcDebug && nrcWarmedUp && (nrcSampleCounter & 31) == 0)
         LogNRCQueryDepthHistogram(nrcRenderQuery, nrcRenderQueryDepth, nrcBatchSize);
 
-        // Outputs are compact now, so DON'T use nrcRenderQuery as the
-        // active mask here.
-        LogNRCMagnitudeStats("prediction", nrcInferenceOutputs, nQueries,
-                             (int)kNRCOutputDims);
-    }
+    if (Options->nrcDebug && nrcWarmedUp && (nrcSampleCounter & 31) == 0)
+        LogNRCMagnitudeStats("prediction", nrcInferenceOutputs, nrcBatchSize,
+                             (int)kNRCOutputDims, nrcRenderQuery);
 }
 
 void WavefrontPathIntegrator::NRCDumpPredictedImage(const std::string &filename) {
