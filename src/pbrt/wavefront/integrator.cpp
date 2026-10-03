@@ -2080,7 +2080,6 @@ void WavefrontPathIntegrator::NRCInferenceForRenderPaths() {
     if (!nrcCache || !nrcWarmedUp)
         return;
     
-    return; 
     // Ensure surfscatter.cpp's feature-row and snapshot writes for this pass
     // are visible before tcnn reads nrcInputs.
     cudaDeviceSynchronize();
@@ -2090,6 +2089,8 @@ void WavefrontPathIntegrator::NRCInferenceForRenderPaths() {
     // since those are filtered out below via nrcRenderQuery.
     nrcCache->Inference(nrcInputs, nrcInferenceOutputs);
     cudaDeviceSynchronize();
+
+    return; // TEMP
 
     const uint8_t *renderQuery = nrcRenderQuery;
     const float *outputs = nrcInferenceOutputs;
