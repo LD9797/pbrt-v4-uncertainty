@@ -64,7 +64,7 @@ constexpr uint32_t kNRCSuffixLocalStride = kNRCMaxSuffixLen + 1;
 // never, but not impossible) case of a path surviving RR unusually long,
 // so the wavefront loop still has a hard upper bound and the render can't
 // hang on a single pathological sample.
-constexpr int kNRCRROnlySuffixDepthCap = 32;
+constexpr int kNRCRROnlySuffixDepthCap = 4;
 
 
 // RaySamples Definition

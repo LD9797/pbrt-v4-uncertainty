@@ -2072,8 +2072,15 @@ void WavefrontPathIntegrator::NRCTrainingSuffixFinish() {
 }
 
 void WavefrontPathIntegrator::NRCInferenceForRenderPaths() {
-    if (!nrcCache)
+    // Render-time substitution (NRCTerminateAndSubstitute in
+    // surfscatter.cpp) never engages before nrcWarmedUp, so before that no
+    // path has nrcRenderQuery set -- running a full-batch Inference() call
+    // every pass during all nrcWarmupSamples warmup samples would be pure
+    // wasted work with no consumer for its output.
+    if (!nrcCache || !nrcWarmedUp)
         return;
+    
+    return; 
     // Ensure surfscatter.cpp's feature-row and snapshot writes for this pass
     // are visible before tcnn reads nrcInputs.
     cudaDeviceSynchronize();
