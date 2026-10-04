@@ -299,10 +299,13 @@ void WavefrontPathIntegrator::SampleMediumScattering(int wavefrontDepth) {
                     SampledSpectrum Ld = beta * ls->L;
                     Ray ray(w.p, ls->pLight.p() - w.p, w.time, w.medium);
 
-                    // Enqueue shadow ray
+                    // Enqueue shadow ray. Medium-scattering NEE is out of
+                    // scope for the training suffix (see integrator.h), so
+                    // the suffix fields are always zero here.
                     shadowRayQueue->Push(ShadowRayWorkItem{ray, 1 - ShadowEpsilon,
                                                            w.lambda, Ld, r_u, r_l,
-                                                           w.pixelIndex});
+                                                           w.pixelIndex,
+                                                           SampledSpectrum(0.f), 0});
 
                     PBRT_DBG("Enqueued medium shadow ray depth %d "
                              "Ld %f %f %f %f r_u %f %f %f %f "

@@ -27,6 +27,20 @@ void WavefrontPathIntegrator::UpdateFilm() {
             // Provide sample radiance value to film
             SampledWavelengths lambda = pixelSampleState.lambda[pixelIndex];
             Float filterWeight = pixelSampleState.filterWeight[pixelIndex];
+
+#ifdef PBRT_BUILD_NRC
+            // Training-path supervision no longer comes from here. Every
+            // training path that reaches its render-query vertex now gets
+            // an explicit "training suffix" (see surfscatter.cpp's
+            // nrcSuffixActive tracking, integrator.cpp's
+            // NRCTrainingSuffixFinish()): one backward-propagated record per
+            // suffix vertex, built purely by forward multiplication of a
+            // local (reset-to-1) throughput, never by dividing the real
+            // path's beta. nrcValid is therefore never set for training
+            // paths anymore; it's reserved for non-training (render-query)
+            // paths' inference-only use in NRCInferenceForRenderPaths().
+#endif
+
             if (initializeVisibleSurface) {
                 // Call _Film::AddSample()_ with _VisibleSurface_ for pixel sample
                 VisibleSurface visibleSurface =
