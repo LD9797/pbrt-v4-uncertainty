@@ -372,6 +372,10 @@ WavefrontPathIntegrator::WavefrontPathIntegrator(
                           sizeof(float) * kNRCOutputDims * kNRCTrainingBudget);
         cudaMallocManaged(&nrcBudgetAux,
                           sizeof(float) * 2 * kNRCOutputDims * kNRCTrainingBudget);
+        // Device-only (not managed): CPU never reads this directly, only
+        // uploads to it (see NRCTrainAccumulatedRecords()) and the GPU-side
+        // gather kernel reads from it.
+        cudaMalloc(&nrcTrainingIndicesGPU, sizeof(uint32_t) * kNRCTrainingBudget);
         cudaMallocManaged(&nrcInferenceOutputs,
                           sizeof(float) * kNRCOutputDims * nrcBatchSize);
         cudaMemset(nrcInferenceOutputs, 0,
@@ -1733,6 +1737,13 @@ void WavefrontPathIntegrator::NRCTrainAccumulatedRecords() {
         std::iota(nrcTrainingIndices.begin(), nrcTrainingIndices.end(), 0u);
         std::shuffle(nrcTrainingIndices.begin(), nrcTrainingIndices.end(), nrcShuffleRNG);
 
+        // Only the first `used` shuffled indices are actually trained on
+        // this sample -- upload just that prefix (at most kNRCTrainingBudget
+        // entries, a few hundred KB) rather than moving the much larger
+        // nrcCompact* arrays themselves through the CPU.
+        cudaMemcpyAsync(nrcTrainingIndicesGPU, nrcTrainingIndices.data(),
+                        sizeof(uint32_t) * used, cudaMemcpyHostToDevice);
+
         uint32_t batches = std::min<uint32_t>(
             kNRCTrainingBatches,
             (used + kNRCTrainingBatchSize - 1) / kNRCTrainingBatchSize);
@@ -1756,31 +1767,47 @@ void WavefrontPathIntegrator::NRCTrainAccumulatedRecords() {
                                  size_t(b) * kNRCTrainingBatchSize * kNRCOutputDims;
             float *slotAux = nrcBudgetAux +
                              size_t(b) * kNRCTrainingBatchSize * (2 * kNRCOutputDims);
-            for (uint32_t j = 0; j < count; ++j, ++srcIdx) {
-                uint32_t src = nrcTrainingIndices[srcIdx];
-                std::memcpy(slotInputs + size_t(j) * kNRCInputDims,
-                            nrcCompactInputs + size_t(src) * kNRCInputDims,
-                            kNRCInputDims * sizeof(float));
-                std::memcpy(slotTargets + size_t(j) * kNRCOutputDims,
-                            nrcCompactTargets + size_t(src) * kNRCOutputDims,
-                            kNRCOutputDims * sizeof(float));
-                std::memcpy(slotAux + size_t(j) * (2 * kNRCOutputDims),
-                            nrcCompactAux + size_t(src) * (2 * kNRCOutputDims),
-                            2 * kNRCOutputDims * sizeof(float));
-            }
+
+            uint32_t indexOffset = srcIdx;
+            const uint32_t *trainingIndices = nrcTrainingIndicesGPU;
+            const float *compactInputs = nrcCompactInputs;
+            const float *compactTargets = nrcCompactTargets;
+            const float *compactAux = nrcCompactAux;
+            ParallelFor(
+                "NRC gather training batch", count, PBRT_CPU_GPU_LAMBDA(int j) {
+                    uint32_t src = trainingIndices[indexOffset + j];
+
+                    float *dstIn = slotInputs + size_t(j) * kNRCInputDims;
+                    const float *srcIn = compactInputs + size_t(src) * kNRCInputDims;
+                    for (uint32_t c = 0; c < kNRCInputDims; ++c)
+                        dstIn[c] = srcIn[c];
+
+                    float *dstTarget = slotTargets + size_t(j) * kNRCOutputDims;
+                    const float *srcTarget =
+                        compactTargets + size_t(src) * kNRCOutputDims;
+                    for (uint32_t c = 0; c < kNRCOutputDims; ++c)
+                        dstTarget[c] = srcTarget[c];
+
+                    float *dstAux = slotAux + size_t(j) * (2 * kNRCOutputDims);
+                    const float *srcAux = compactAux + size_t(src) * (2 * kNRCOutputDims);
+                    for (uint32_t c = 0; c < 2 * kNRCOutputDims; ++c)
+                        dstAux[c] = srcAux[c];
+                });
+            srcIdx += count;
 
             uint32_t trainBatch = nrc::NeuralRadianceCache::RoundUpBatch(count);
             if (trainBatch > count) {
-                std::memset(slotInputs + size_t(count) * kNRCInputDims, 0,
-                            (trainBatch - count) * kNRCInputDims * sizeof(float));
-                std::memset(slotTargets + size_t(count) * kNRCOutputDims, 0,
-                            (trainBatch - count) * kNRCOutputDims * sizeof(float));
+                uint32_t padding = trainBatch - count;
+                cudaMemsetAsync(slotInputs + size_t(count) * kNRCInputDims, 0,
+                                size_t(padding) * kNRCInputDims * sizeof(float));
+                cudaMemsetAsync(slotTargets + size_t(count) * kNRCOutputDims, 0,
+                                size_t(padding) * kNRCOutputDims * sizeof(float));
                 // Zero reflectance and channel weight -> Y=0, R=0 ->
                 // predicted radiance and gradient both 0 (safe, finite) for
                 // the padding rows, same spirit as zeroing the padded
                 // inputs/targets above.
-                std::memset(slotAux + size_t(count) * (2 * kNRCOutputDims), 0,
-                            (trainBatch - count) * (2 * kNRCOutputDims) * sizeof(float));
+                cudaMemsetAsync(slotAux + size_t(count) * (2 * kNRCOutputDims), 0,
+                                size_t(padding) * (2 * kNRCOutputDims) * sizeof(float));
             }
 
             nrcLastLoss =

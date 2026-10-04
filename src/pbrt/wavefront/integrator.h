@@ -525,6 +525,13 @@ class WavefrontPathIntegrator {
     // the persistent (deterministic-seed) generator driving that shuffle.
     std::vector<uint32_t> nrcTrainingIndices;
     std::mt19937 nrcShuffleRNG{0x5eedu};
+    // Device-resident copy of (a prefix of) nrcTrainingIndices -- only the
+    // first `used` (<= kNRCTrainingBudget) shuffled indices actually get
+    // trained on this sample, so that's all that's uploaded each call to
+    // NRCTrainAccumulatedRecords(). Lets the per-batch gather run as a GPU
+    // ParallelFor instead of a CPU memcpy loop reading the GPU-resident
+    // nrcCompact* arrays.
+    uint32_t *nrcTrainingIndicesGPU = nullptr;
 
     // Host-only running diagnostics for this pass, accumulated across each
     // wavefrontDepth's TraceShadowRays() call and reset in
