@@ -230,7 +230,15 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
             // render-time substitution.
             constexpr bool kEnableRenderSubstitution = true;
             nrcTerminateAndSubstitute = kEnableRenderSubstitution && nrcWarmedUp &&
-                                         nrcCaptureNow && !nrcTrainingPath[w.pixelIndex];
+                                        nrcCaptureNow && !nrcTrainingPath[w.pixelIndex];
+
+            constexpr bool kAllowNRCSubstitutionForThisBxDF =
+                !std::is_same_v<ConcreteBxDF, ConductorBxDF>;
+
+            nrcTerminateAndSubstitute = kEnableRenderSubstitution &&
+                                        kAllowNRCSubstitutionForThisBxDF && nrcWarmedUp &&
+                                        nrcCaptureNow && !nrcTrainingPath[w.pixelIndex];
+
             if (nrcCaptureNow) {
                 // Snapshot the instant the query vertex is found (whichever
                 // of the four ways). No longer consumed by film.cpp (that
