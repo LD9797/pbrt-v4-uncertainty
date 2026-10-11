@@ -1837,13 +1837,28 @@ void WavefrontPathIntegrator::NRCTrainAccumulatedRecords() {
                         "trainBatch=%u loss=%.9g finite=%d\n",
                         nrcSampleCounter, b + 1, batches, available, used, count, trainBatch,
                         nrcLastLoss, std::isfinite(nrcLastLoss) ? 1 : 0);
+        }
 
-            if (Options->nrcDebug) {
-                // Run the just-updated network on this batch's own records
-                // (slotInputs already padded/rounded to trainBatch, so no
-                // extra rounding needed here) to see how well it now
-                // predicts the targets it was just trained on.
-                cudaDeviceSynchronize();
+        if (Options->nrcDebug) {
+            // All gradient steps are finished now. Evaluate every training
+            // batch using the same final network state, so the brightness
+            // buckets below answer "how does the final network predict
+            // dark vs bright targets", not a mix of different
+            // intermediate network states from mid-training.
+            for (uint32_t b = 0; b < batches; ++b) {
+                uint32_t count = base + (b < remainder ? 1u : 0u);
+                if (count == 0)
+                    continue;
+
+                float *slotInputs = nrcBudgetInputs +
+                                    size_t(b) * kNRCTrainingBatchSize * kNRCInputDims;
+                float *slotTargets = nrcBudgetTargets +
+                                     size_t(b) * kNRCTrainingBatchSize * kNRCOutputDims;
+                float *slotAux = nrcBudgetAux +
+                                 size_t(b) * kNRCTrainingBatchSize * (2 * kNRCOutputDims);
+
+                uint32_t trainBatch = nrc::NeuralRadianceCache::RoundUpBatch(count);
+
                 nrcCache->InferenceN(slotInputs, nrcInferenceOutputs, trainBatch);
                 cudaDeviceSynchronize();
 
