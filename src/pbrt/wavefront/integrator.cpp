@@ -1750,6 +1750,25 @@ void WavefrontPathIntegrator::NRCTrainAccumulatedRecords() {
         uint32_t base = used / batches;
         uint32_t remainder = used % batches;
         uint32_t srcIdx = 0;
+
+        // --nrc-debug only: bucket this sample's training records by target
+        // brightness and compare each bucket's just-trained-on prediction
+        // (max(0,networkOutput)*reflectance) against its ground-truth
+        // target. Lets a brightness range where the network is
+        // systematically over/under-predicting (e.g. accurate in dim
+        // regions but badly under-predicting bright highlights) show up
+        // even when the aggregate loss looks fine. Ratio is sum(predicted)
+        // / sum(target) within each bucket (more stable than averaging
+        // per-record ratios, which blow up as target -> 0).
+        constexpr int kNumNRCBrightnessBuckets = 5;
+        constexpr float kNRCBrightnessBucketMax[kNumNRCBrightnessBuckets] = {
+            0.1f, 1.f, 5.f, 20.f, Infinity};
+        constexpr const char *kNRCBrightnessBucketLabel[kNumNRCBrightnessBuckets] = {
+            "0 - 0.1", "0.1 - 1", "1 - 5", "5 - 20", "20+"};
+        double nrcBucketPredSum[kNumNRCBrightnessBuckets] = {};
+        double nrcBucketTargetSum[kNumNRCBrightnessBuckets] = {};
+        uint64_t nrcBucketCount[kNumNRCBrightnessBuckets] = {};
+
         for (uint32_t b = 0; b < batches; ++b) {
             uint32_t count = base + (b < remainder ? 1u : 0u);
             if (count == 0)
@@ -1818,6 +1837,53 @@ void WavefrontPathIntegrator::NRCTrainAccumulatedRecords() {
                         "trainBatch=%u loss=%.9g finite=%d\n",
                         nrcSampleCounter, b + 1, batches, available, used, count, trainBatch,
                         nrcLastLoss, std::isfinite(nrcLastLoss) ? 1 : 0);
+
+            if (Options->nrcDebug) {
+                // Run the just-updated network on this batch's own records
+                // (slotInputs already padded/rounded to trainBatch, so no
+                // extra rounding needed here) to see how well it now
+                // predicts the targets it was just trained on.
+                cudaDeviceSynchronize();
+                nrcCache->InferenceN(slotInputs, nrcInferenceOutputs, trainBatch);
+                cudaDeviceSynchronize();
+
+                for (uint32_t j = 0; j < count; ++j) {
+                    for (uint32_t c = 0; c < kNRCOutputDims; ++c) {
+                        float target = slotTargets[size_t(j) * kNRCOutputDims + c];
+                        float reflectance = slotAux[size_t(j) * (2 * kNRCOutputDims) + c];
+                        float networkOutput =
+                            nrcInferenceOutputs[size_t(j) * kNRCOutputDims + c];
+                        float predicted = std::max(0.f, networkOutput) * reflectance;
+
+                        int bucket = 0;
+                        while (bucket < kNumNRCBrightnessBuckets - 1 &&
+                               target >= kNRCBrightnessBucketMax[bucket])
+                            ++bucket;
+
+                        nrcBucketPredSum[bucket] += predicted;
+                        nrcBucketTargetSum[bucket] += target;
+                        ++nrcBucketCount[bucket];
+                    }
+                }
+            }
+        }
+
+        if (Options->nrcDebug) {
+            fprintf(stderr, "NRC TRAIN ACCURACY BY TARGET BRIGHTNESS (sample=%d):\n",
+                    nrcSampleCounter);
+            fprintf(stderr, "  %-10s %12s %16s\n", "range", "count", "pred/target");
+            for (int i = 0; i < kNumNRCBrightnessBuckets; ++i) {
+                if (nrcBucketCount[i] == 0) {
+                    fprintf(stderr, "  %-10s %12s %16s\n", kNRCBrightnessBucketLabel[i], "0",
+                            "n/a");
+                    continue;
+                }
+                double ratio = nrcBucketTargetSum[i] > 0.0
+                                  ? nrcBucketPredSum[i] / nrcBucketTargetSum[i]
+                                  : 0.0;
+                fprintf(stderr, "  %-10s %12llu %16.6g\n", kNRCBrightnessBucketLabel[i],
+                        (unsigned long long)nrcBucketCount[i], ratio);
+            }
         }
 
         // The post-train inference call below exists purely to feed the
