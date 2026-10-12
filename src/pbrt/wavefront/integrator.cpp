@@ -1863,22 +1863,38 @@ void WavefrontPathIntegrator::NRCTrainAccumulatedRecords() {
                 cudaDeviceSynchronize();
 
                 for (uint32_t j = 0; j < count; ++j) {
+                    // Combine this record's per-channel target/predicted
+                    // values into a single perceived-brightness scalar
+                    // using the channel weights stored alongside the
+                    // reflectance in slotAux (layout: [R0..R3 | W0..W3]),
+                    // rather than bucketing each spectral channel
+                    // independently. Otherwise a single record would be
+                    // counted kNRCOutputDims times, and a material (e.g.
+                    // gold) with very different per-wavelength values
+                    // could land in different buckets per channel even
+                    // though it's one visual brightness.
+                    const float *aux = slotAux + size_t(j) * (2 * kNRCOutputDims);
+                    float targetBrightness = 0.f, predictedBrightness = 0.f;
                     for (uint32_t c = 0; c < kNRCOutputDims; ++c) {
                         float target = slotTargets[size_t(j) * kNRCOutputDims + c];
-                        float reflectance = slotAux[size_t(j) * (2 * kNRCOutputDims) + c];
+                        float reflectance = aux[c];
+                        float weight = aux[kNRCOutputDims + c];
                         float networkOutput =
                             nrcInferenceOutputs[size_t(j) * kNRCOutputDims + c];
                         float predicted = std::max(0.f, networkOutput) * reflectance;
 
-                        int bucket = 0;
-                        while (bucket < kNumNRCBrightnessBuckets - 1 &&
-                               target >= kNRCBrightnessBucketMax[bucket])
-                            ++bucket;
-
-                        nrcBucketPredSum[bucket] += predicted;
-                        nrcBucketTargetSum[bucket] += target;
-                        ++nrcBucketCount[bucket];
+                        targetBrightness += target * weight;
+                        predictedBrightness += predicted * weight;
                     }
+
+                    int bucket = 0;
+                    while (bucket < kNumNRCBrightnessBuckets - 1 &&
+                           targetBrightness >= kNRCBrightnessBucketMax[bucket])
+                        ++bucket;
+
+                    nrcBucketPredSum[bucket] += predictedBrightness;
+                    nrcBucketTargetSum[bucket] += targetBrightness;
+                    ++nrcBucketCount[bucket];
                 }
             }
         }
