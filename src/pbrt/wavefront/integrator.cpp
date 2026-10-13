@@ -1732,67 +1732,13 @@ void WavefrontPathIntegrator::NRCTrainAccumulatedRecords() {
     // duplication) across fewer/smaller batches instead of padding the
     // budget out with repeats.
     uint32_t used = std::min(available, kNRCTrainingBudget);
-    if (used > 0) {
-        // Test: oversample rare bright records. Uniform shuffling leaves
-        // bright records (targetBrightness >= 0.1) almost entirely absent
-        // from a sample's training budget -- typically only ~5-10 out of
-        // ~65536 accumulated records -- so they barely influence training.
-        // Force at least 1% of the training budget to be bright records
-        // (repeating them via modulo if there are fewer than that), while
-        // the rest of the budget is filled from the normal (non-bright)
-        // records. Needs a sync first since nrcCompactTargets/nrcCompactAux
-        // are read here on the CPU and were last written by GPU kernels.
-        cudaDeviceSynchronize();
-
-        std::vector<uint32_t> brightIndices;
-        std::vector<uint32_t> normalIndices;
-        brightIndices.reserve(available);
-        normalIndices.reserve(available);
-
-        for (uint32_t i = 0; i < available; ++i) {
-            const float *target = nrcCompactTargets + size_t(i) * kNRCOutputDims;
-            const float *aux = nrcCompactAux + size_t(i) * (2 * kNRCOutputDims);
-
-            float targetBrightness = 0.f;
-            for (uint32_t c = 0; c < kNRCOutputDims; ++c) {
-                float weight = aux[kNRCOutputDims + c];
-                targetBrightness += target[c] * weight;
-            }
-
-            if (targetBrightness >= 0.1f)
-                brightIndices.push_back(i);
-            else
-                normalIndices.push_back(i);
-        }
-
-        std::shuffle(brightIndices.begin(), brightIndices.end(), nrcShuffleRNG);
-        std::shuffle(normalIndices.begin(), normalIndices.end(), nrcShuffleRNG);
-
-        nrcTrainingIndices.clear();
-        nrcTrainingIndices.reserve(used);
-
-        uint32_t brightSlots = 0;
-        if (!brightIndices.empty())
-            brightSlots = std::min<uint32_t>(
-                used, std::max<uint32_t>((uint32_t)brightIndices.size(), used / 100));  // 1%
-
-        for (uint32_t i = 0; i < brightSlots; ++i)
-            nrcTrainingIndices.push_back(brightIndices[i % brightIndices.size()]);
-
-        uint32_t remaining = used - brightSlots;
-        if (!normalIndices.empty()) {
-            for (uint32_t i = 0; i < remaining; ++i)
-                nrcTrainingIndices.push_back(normalIndices[i % normalIndices.size()]);
-        } else {
-            for (uint32_t i = 0; i < remaining; ++i)
-                nrcTrainingIndices.push_back(brightIndices[i % brightIndices.size()]);
-        }
-
-        // Mix bright records throughout the four batches rather than
-        // leaving them all clustered at the front.
+    if (used > 0 && !nrcWarmedUp) {
+        nrcTrainingIndices.resize(available);
+        std::iota(nrcTrainingIndices.begin(), nrcTrainingIndices.end(), 0u);
         std::shuffle(nrcTrainingIndices.begin(), nrcTrainingIndices.end(), nrcShuffleRNG);
 
         // Only the first `used` shuffled indices are actually trained on
+
         // this sample -- upload just that prefix (at most kNRCTrainingBudget
         // entries, a few hundred KB) rather than moving the much larger
         // nrcCompact* arrays themselves through the CPU.
