@@ -66,6 +66,13 @@ Rendering options:
   --nrc-output <path>           Save path for the NRC predicted image. (Default: disabled -- no diagnostic image written)
   --enable-nrc                  Enable the Neural Radiance Cache side-computation. (Default: disabled)
   --nrc-debug                   Enable verbose per-pass NRC diagnostic logging to stderr. (Default: disabled)
+  --nrc-brightness-oversampling=<bool>
+                                 On: force a small fraction of each training batch to be
+                                 rare bright training records instead of pure uniform
+                                 sampling. Off: original plain uniform shuffle selection.
+                                 Note the '=' is required to pass false; a bare
+                                 --nrc-brightness-oversampling always sets it to true.
+                                 (Default: enabled)
   --nthreads <num>              Use specified number of threads for rendering.
   --outfile <filename>          Write the final image to the given filename.
   --pixel <x,y>                 Render just the specified pixel.
@@ -200,6 +207,8 @@ int main(int argc, char *argv[]) {
             ParseArg(&iter, args.end(), "nrc-output", &options.nrcOutputFile, onError) ||
             ParseArg(&iter, args.end(), "enable-nrc", &options.enableNRC, onError) ||
             ParseArg(&iter, args.end(), "nrc-debug", &options.nrcDebug, onError) ||
+            ParseArg(&iter, args.end(), "nrc-brightness-oversampling",
+                     &options.nrcBrightnessOversampling, onError) ||
             ParseArg(&iter, args.end(), "nthreads", &options.nThreads, onError) ||
             ParseArg(&iter, args.end(), "outfile", &options.imageFile, onError) ||
             ParseArg(&iter, args.end(), "pixelstats", &options.recordPixelStatistics,
