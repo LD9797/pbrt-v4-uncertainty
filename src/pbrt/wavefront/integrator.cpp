@@ -1732,7 +1732,7 @@ void WavefrontPathIntegrator::NRCTrainAccumulatedRecords() {
     // duplication) across fewer/smaller batches instead of padding the
     // budget out with repeats.
     uint32_t used = std::min(available, kNRCTrainingBudget);
-    if (used > 0 && !nrcWarmedUp) {
+    if (used > 0) {
         nrcTrainingIndices.resize(available);
         std::iota(nrcTrainingIndices.begin(), nrcTrainingIndices.end(), 0u);
         std::shuffle(nrcTrainingIndices.begin(), nrcTrainingIndices.end(), nrcShuffleRNG);

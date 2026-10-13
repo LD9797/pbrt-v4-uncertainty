@@ -97,11 +97,15 @@ void WavefrontPathIntegrator::GenerateCameraRays(int y0, Transform movingFromCam
                 bool isTrainingPath = nrcCaptureAll || ((rel.x % tileW) == offsetX &&
                                                         (rel.y % tileH) == offsetY);
 
-                // Once warmed up, stop selecting any new training paths --
-                // NRC rendering/inference stays fully enabled, but no more
-                // training suffixes are generated or accumulated from this
-                // point on (train-then-freeze test).
-                nrcTrainingPath[pixelIndex] = (!nrcWarmedUp && isTrainingPath) ? 1 : 0;
+                // Compromise test: keep training past warmup, but only
+                // generate new training paths every 4th sample once warmed
+                // up (full-rate during warmup itself) -- NRC
+                // rendering/inference stays fully enabled regardless.
+                bool trainThisSample =
+                    !nrcWarmedUp || ((nrcSampleCounter % 4) == 0);
+
+                nrcTrainingPath[pixelIndex] =
+                    (trainThisSample && isTrainingPath) ? 1 : 0;
 
                 // Independently select ~1/16 of ALL paths (not just training
                 // ones -- the flag is only ever read when nrcTrainingPath is
