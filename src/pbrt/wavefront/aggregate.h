@@ -41,10 +41,12 @@ class CPUAggregate : public WavefrontAggregate {
                           RayQueue *nextRayQueue) const;
 
     void IntersectShadow(int maxRays, ShadowRayQueue *shadowRayQueue,
-                         SOA<PixelSampleState> *pixelSampleState) const;
+                         SOA<PixelSampleState> *pixelSampleState,
+                         float *nrcSuffixLocal) const;
 
     void IntersectShadowTr(int maxRays, ShadowRayQueue *shadowRayQueue,
-                           SOA<PixelSampleState> *pixelSampleState) const;
+                           SOA<PixelSampleState> *pixelSampleState,
+                           float *nrcSuffixLocal) const;
 
     void IntersectOneRandom(int maxRays,
                             SubsurfaceScatterQueue *subsurfaceScatterQueue) const;

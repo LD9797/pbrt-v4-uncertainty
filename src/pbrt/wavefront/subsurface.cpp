@@ -197,8 +197,12 @@ void WavefrontPathIntegrator::SampleSubsurface(int wavefrontDepth) {
                     ray.medium = Dot(ray.d, intr.n) > 0 ? w.mediumInterface.outside
                                                         : w.mediumInterface.inside;
 
+                // Subsurface-scattering NEE is out of scope for the
+                // training suffix (see integrator.h), so the suffix fields
+                // are always zero here.
                 shadowRayQueue->Push(ShadowRayWorkItem{ray, 1 - ShadowEpsilon, lambda, Ld,
-                                                       r_u, r_l, w.pixelIndex});
+                                                       r_u, r_l, w.pixelIndex,
+                                                       SampledSpectrum(0.f), 0});
             }
         });
 

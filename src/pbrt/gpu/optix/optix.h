@@ -62,6 +62,10 @@ struct RayIntersectParameters {
     // shadow rays
     ShadowRayQueue *shadowRayQueue;
     SOA<PixelSampleState> pixelSampleState;
+    // Training-suffix NEE target (nullptr if NRC is disabled/not yet
+    // allocated): RecordShadowRayResult adds each unoccluded shadow ray's
+    // suffix-parallel contribution (ShadowRayWorkItem::nrcSuffixLd) into it.
+    float *nrcSuffixLocal;
 
     // Subsurface scattering...
     SubsurfaceScatterQueue *subsurfaceScatterQueue;
