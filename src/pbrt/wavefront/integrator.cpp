@@ -1751,11 +1751,9 @@ void WavefrontPathIntegrator::NRCTrainAccumulatedRecords() {
         normalIndices.reserve(available);
 
         for (uint32_t i = 0; i < available; ++i) {
-            const float *target =
-                nrcCompactTargets + size_t(i) * kNRCOutputDims;
+            const float *target = nrcCompactTargets + size_t(i) * kNRCOutputDims;
 
-            const float *aux =
-                nrcCompactAux + size_t(i) * (2 * kNRCOutputDims);
+            const float *aux = nrcCompactAux + size_t(i) * (2 * kNRCOutputDims);
 
             float targetBrightness = 0.f;
 
@@ -1770,13 +1768,9 @@ void WavefrontPathIntegrator::NRCTrainAccumulatedRecords() {
                 normalIndices.push_back(i);
         }
 
-        std::shuffle(brightIndices.begin(),
-                     brightIndices.end(),
-                     nrcShuffleRNG);
+        std::shuffle(brightIndices.begin(), brightIndices.end(), nrcShuffleRNG);
 
-        std::shuffle(normalIndices.begin(),
-                     normalIndices.end(),
-                     nrcShuffleRNG);
+        std::shuffle(normalIndices.begin(), normalIndices.end(), nrcShuffleRNG);
 
         nrcTrainingIndices.clear();
         nrcTrainingIndices.reserve(used);
@@ -1785,31 +1779,24 @@ void WavefrontPathIntegrator::NRCTrainAccumulatedRecords() {
 
         if (!brightIndices.empty()) {
             brightSlots = std::min<uint32_t>(
-                used,
-                std::max<uint32_t>(
-                    (uint32_t)brightIndices.size(),
-                    used / 400));   // 0.25%
+                used, std::max<uint32_t>((uint32_t)brightIndices.size(),
+                                         used / 800));  // 0.25%
         }
 
         for (uint32_t i = 0; i < brightSlots; ++i)
-            nrcTrainingIndices.push_back(
-                brightIndices[i % brightIndices.size()]);
+            nrcTrainingIndices.push_back(brightIndices[i % brightIndices.size()]);
 
         uint32_t remaining = used - brightSlots;
 
         if (!normalIndices.empty()) {
             for (uint32_t i = 0; i < remaining; ++i)
-                nrcTrainingIndices.push_back(
-                    normalIndices[i % normalIndices.size()]);
+                nrcTrainingIndices.push_back(normalIndices[i % normalIndices.size()]);
         } else {
             for (uint32_t i = 0; i < remaining; ++i)
-                nrcTrainingIndices.push_back(
-                    brightIndices[i % brightIndices.size()]);
+                nrcTrainingIndices.push_back(brightIndices[i % brightIndices.size()]);
         }
 
-        std::shuffle(nrcTrainingIndices.begin(),
-                     nrcTrainingIndices.end(),
-                     nrcShuffleRNG);
+        std::shuffle(nrcTrainingIndices.begin(), nrcTrainingIndices.end(), nrcShuffleRNG);
 
         // Only the first `used` shuffled indices are actually trained on
 
