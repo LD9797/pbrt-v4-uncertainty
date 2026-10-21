@@ -228,3 +228,4 @@ is straightforward:
 ```bash
 $ imgtool denoise-optix noisy.exr --outfile denoised.exr
 ```
+# Efficiency-and-Representation-Trade-offs
