@@ -1,0 +1,106 @@
+// NRC neural network: 53 inputs -> encoding -> 68 values -> 5 x 64 hidden -> 4 outputs.
+// Matches src/nrc/nrc_config.json and the input layout in surfscatter.cpp.
+// Render:  dot -Tsvg nrc_network.dot -o nrc_network.svg   (or -Tpng)
+
+digraph NRC_Network {
+    rankdir=LR;
+    nodesep=0.25;
+    ranksep=0.9;
+    fontname="Helvetica";
+    node [fontname="Helvetica", fontsize=11, shape=box, style="rounded,filled", fillcolor="#ffffff"];
+    edge [fontname="Helvetica", fontsize=10];
+
+    // ---------------------------------------------------------------
+    // 1. Raw inputs (written by surfscatter.cpp)
+    // ---------------------------------------------------------------
+    subgraph cluster_in {
+        label="INPUT: 53 raw numbers  (surfscatter.cpp)";
+        style=filled; fillcolor="#eef5ff"; color="#6699cc";
+
+        i_pos   [label="Position\nidx 0-35  (36)\nsin(2^d * x), 12 freqs x 3 axes"];
+        i_wo    [label="Outgoing direction wo\nidx 36-37  (2)\n(theta, phi) in 0..1"];
+        i_nrm   [label="Shading normal\nidx 38-39  (2)\n(theta, phi) in 0..1"];
+        i_rough [label="Roughness\nidx 40  (1)\n1 - exp(-r)"];
+        i_alpha [label="Diffuse reflectance alpha\nidx 41-43  (3)\nRGB 0..1"];
+        i_beta  [label="Specular reflectance beta\nidx 44-46  (3)\nRGB 0..1"];
+        i_lam   [label="4 wavelengths + 2 padding\nidx 47-52  (6)\nlambda scaled 0..1, then 1, 1"];
+    }
+
+    // ---------------------------------------------------------------
+    // 2. Encoding (nrc_config.json "encoding": Composite)
+    // ---------------------------------------------------------------
+    subgraph cluster_enc {
+        label="ENCODING: tcnn Composite  (nrc_config.json)";
+        style=filled; fillcolor="#f3ffee"; color="#66aa55";
+
+        e_id1 [label="Identity\n36 -> 36"];
+        e_ob1 [label="OneBlob, 4 bins\n2 dims -> 2 x 4 = 8"];
+        e_ob2 [label="OneBlob, 4 bins\n2 dims -> 2 x 4 = 8"];
+        e_ob3 [label="OneBlob, 4 bins\n1 dim -> 4"];
+        e_id2 [label="Identity\n3 -> 3"];
+        e_id3 [label="Identity\n3 -> 3"];
+        e_id4 [label="Identity\n6 -> 6"];
+    }
+
+    i_pos   -> e_id1 [label="36"];
+    i_wo    -> e_ob1 [label="2"];
+    i_nrm   -> e_ob2 [label="2"];
+    i_rough -> e_ob3 [label="1"];
+    i_alpha -> e_id2 [label="3"];
+    i_beta  -> e_id3 [label="3"];
+    i_lam   -> e_id4 [label="6"];
+
+    // ---------------------------------------------------------------
+    // 3. Encoded vector (concatenation)
+    // ---------------------------------------------------------------
+    concat [shape=box3d, fillcolor="#fff7b0",
+            label="ENCODED VECTOR\n68 values\n\n36 + 8 + 8 + 4 + 3 + 3 + 6"];
+
+    e_id1 -> concat [label="36"];
+    e_ob1 -> concat [label="8"];
+    e_ob2 -> concat [label="8"];
+    e_ob3 -> concat [label="4"];
+    e_id2 -> concat [label="3"];
+    e_id3 -> concat [label="3"];
+    e_id4 -> concat [label="6"];
+
+    // ---------------------------------------------------------------
+    // 4. MLP (FullyFusedMLP, ReLU, 64 neurons, 5 hidden layers)
+    // ---------------------------------------------------------------
+    subgraph cluster_mlp {
+        label="NETWORK: FullyFusedMLP, ReLU, no output activation";
+        style=filled; fillcolor="#fff4e8"; color="#cc8844";
+
+        h1 [shape=box3d, fillcolor="#ffe3c2", label="Hidden layer 1\n64 neurons, ReLU"];
+        h2 [shape=box3d, fillcolor="#ffe3c2", label="Hidden layer 2\n64 neurons, ReLU"];
+        h3 [shape=box3d, fillcolor="#ffe3c2", label="Hidden layer 3\n64 neurons, ReLU"];
+        h4 [shape=box3d, fillcolor="#ffe3c2", label="Hidden layer 4\n64 neurons, ReLU"];
+        h5 [shape=box3d, fillcolor="#ffe3c2", label="Hidden layer 5\n64 neurons, ReLU"];
+        out [shape=box3d, fillcolor="#ffd0d0", label="Output layer\n4 values  q\n(one per wavelength)"];
+    }
+
+    concat -> h1 [label="68 -> 64"];
+    h1 -> h2 [label="64 -> 64"];
+    h2 -> h3 [label="64 -> 64"];
+    h3 -> h4 [label="64 -> 64"];
+    h4 -> h5 [label="64 -> 64"];
+    h5 -> out [label="64 -> 4"];
+
+    // ---------------------------------------------------------------
+    // 5. After the network (outside tcnn)
+    // ---------------------------------------------------------------
+    refl [label="Reflectance R\n(4 values, floored at 0.001)\nstored at the same vertex", fillcolor="#eeeeee"];
+    mul  [shape=circle, label="x", fillcolor="#fff7b0"];
+    lhat [shape=oval, fillcolor="#d8f5d0",
+          label="Radiance  L_hat = R * q\n(4 wavelengths)"];
+    use  [shape=note, fillcolor="#ffffff",
+          label="Used in 3 places:\nrender: L += beta * max(0,q) * R\nbootstrap: Lnext = max(0,q) * R\nloss: R * q  vs  target Ls"];
+
+    out  -> mul [label="q"];
+    refl -> mul;
+    mul  -> lhat;
+    lhat -> use [style=dashed];
+
+    // Keep the encoded groups in input order
+    {rank=same; i_pos; i_wo; i_nrm; i_rough; i_alpha; i_beta; i_lam;}
+}
