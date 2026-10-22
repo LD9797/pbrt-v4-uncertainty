@@ -1,0 +1,169 @@
+// NRC process flow with the functions the code goes through.
+// Render:  dot -Tsvg nrc_flow.dot -o nrc_flow.svg   (or -Tpng)
+
+digraph NRC {
+    rankdir=TB;
+    compound=true;
+    fontname="Helvetica";
+    node  [fontname="Helvetica", fontsize=11, shape=box, style="rounded,filled", fillcolor="#ffffff"];
+    edge  [fontname="Helvetica", fontsize=10];
+
+    // ---------------------------------------------------------------
+    // Legend
+    // ---------------------------------------------------------------
+    subgraph cluster_legend {
+        label="Legend"; style=dashed; fontsize=10;
+        l1 [label="render path (most pixels)", fillcolor="#d6ecff"];
+        l2 [label="training path (few pixels)", fillcolor="#ffe3c2"];
+        l3 [label="network call (tiny-cuda-nn)", fillcolor="#d8f5d0", shape=box3d];
+        l4 [label="decision", shape=diamond, fillcolor="#fff7b0"];
+        l1 -> l2 -> l3 -> l4 [style=invis];
+    }
+
+    start [label="Render()\nintegrator.cpp\nfor each SAMPLE", shape=oval, fillcolor="#eeeeee"];
+    start_sample [label="nrcAccumulatedRecords = 0"];
+    start -> start_sample;
+
+    // ---------------------------------------------------------------
+    // One band
+    // ---------------------------------------------------------------
+    subgraph cluster_band {
+        label="for each BAND of scanlines  (Render(), integrator.cpp)";
+        style="rounded"; color="#888888"; fontsize=12;
+
+        reset [label="NRCResetSampleBuffers()\nclear NRC state"];
+
+        // ---- Step 1: camera
+        subgraph cluster_camera {
+            label="Step 1: birth of the ray  (camera.cpp)";
+            style=filled; fillcolor="#f4f4f4"; color="#bbbbbb";
+
+            gen   [label="GenerateCameraRays()\nnormal pbrt camera ray"];
+            tile  [label="pick pixel inside tile\n(nrcTrainingTileW x H, hash of sample)"];
+            warm  [label="training sample?\n(!nrcWarmedUp  or  nrcSampleCounter % 4 == 0)", shape=diamond, fillcolor="#fff7b0"];
+            rr    [label="1 in 16 ?\nHash(x,y,sample) & 15 == 0", shape=diamond, fillcolor="#fff7b0"];
+            savep [label="nrcPathPrevP = camera position\n(for area spread)"];
+            gen -> tile -> warm;
+            warm -> rr    [label="yes + picked"];
+            rr   -> savep [label="RR-only training"];
+            warm -> savep [label="no / not picked =\nrender path", style=dashed];
+            rr   -> savep [label="normal training", style=dashed];
+        }
+
+        // ---- Depth loop
+        subgraph cluster_depth {
+            label="Steps 2-6: wavefront depth loop (every bounce depth)";
+            style=filled; fillcolor="#fbfbfb"; color="#bbbbbb";
+
+            isect [label="aggregate->IntersectClosest()\nfind hit"];
+            emis  [label="HandleEmissiveIntersection()\nHandleEscapedRays()\nintegrator.cpp\nadd emission to pixel L\n+ copy to suffix `local` (training only)"];
+            mat   [label="EvaluateMaterialsAndBSDFs()\nsurfscatter.cpp\nbuild BSDF"];
+
+            spread [label="area-spread test\n(kNRCSpreadC = 0.01)\ndepth 0: a0 = |x0-x1|^2 / (4 pi cos)\nlater: sum sqrt(d^2 / (pdfPrev cos))", fillcolor="#fff7b0", shape=diamond];
+            notq   [label="not query vertex:\nsave nrcPathPrevP / nrcPathPrevPdf\nnormal bounce"];
+
+            qv [label="QUERY VERTEX\n(spread, maxDepth-1,\nbad BSDF sample, or RR kill)", fillcolor="#fff7b0", shape=diamond];
+            feat [label="write 53 input numbers\nR, luminance weight, beta\n(surfscatter.cpp)"];
+
+            kind [label="training path ?", shape=diamond, fillcolor="#fff7b0"];
+
+            // render path
+            stop [label="nrcTerminateAndSubstitute\nsets nrcRenderQuery = 1\nnrcInputs row, nrcSnapshotBeta\nSTOP: no NEE, no next ray", fillcolor="#d6ecff"];
+
+            // training path
+            suf  [label="start / continue SUFFIX\nthroughput = 1\nnrcSuffixInputs, nrcSuffixLocal,\nnrcSuffixStep, nrcSuffixReflectance", fillcolor="#ffe3c2"];
+            nee  [label="NEE shadow rays\nTraceShadowRays()\nadd light to suffix `local`", fillcolor="#ffe3c2"];
+            next [label="sample next direction\n(next bounce ray)", fillcolor="#ffe3c2"];
+            sufend [label="suffix ends ?", shape=diamond, fillcolor="#fff7b0"];
+            natural [label="natural end\n(escape / bad BSDF / Russian roulette)\nLnext = 0", fillcolor="#ffe3c2"];
+            heur    [label="heuristic end or cap (4 vertices)\nterminatedByHeuristic = 1\nbootstrap vertex input row saved\n(only after warmup)", fillcolor="#ffe3c2"];
+            rronly  [label="RR-only suffix:\nnever cut short, only natural end\nsingle accumulated target", fillcolor="#ffe3c2"];
+
+            isect -> emis -> mat -> spread;
+            spread -> notq [label="no"];
+            notq -> isect [label="next depth", constraint=false];
+            spread -> qv   [label="yes"];
+            qv -> feat -> kind;
+            kind -> stop [label="no (render path)\nafter warmup"];
+            kind -> suf  [label="yes"];
+            suf -> nee -> next -> sufend;
+            sufend -> natural [label="ended"];
+            sufend -> heur    [label="blurry / cap"];
+            sufend -> isect   [label="keep going", constraint=false];
+            suf -> rronly [label="RR-only flag", style=dashed];
+        }
+
+        // ---- After the depth loop
+        infer [label="NRCInferenceForRenderPaths()\nintegrator.cpp  (only after warmup)\nL += beta * max(0,q) * R", fillcolor="#d6ecff"];
+        netInf [label="nrc::NeuralRadianceCache::Inference()\nnrc.cu", shape=box3d, fillcolor="#d8f5d0"];
+
+        film [label="UpdateFilm()\nfilm.cpp\nwrite pixel"];
+
+        finish [label="NRCTrainingSuffixFinish()\nintegrator.cpp", fillcolor="#ffe3c2"];
+        boot   [label="bootstrap query\nnrc::NeuralRadianceCache::InferenceN()\n(after warmup, heuristic/cap ends only)", shape=box3d, fillcolor="#d8f5d0"];
+        back   [label="backward walk (ParallelFor)\nLs = local[s] + step[s] * L_{s+1}\none target per suffix vertex", fillcolor="#ffe3c2"];
+
+        accum [label="NRCAccumulateTrainingRecords()\nGPU atomicAdd compaction\ninputs + target Ls + aux [R | weight]\n-> nrcCompactInputs / Targets / Aux", fillcolor="#ffe3c2"];
+
+        reset -> gen;
+        savep -> isect;
+        stop -> infer [label="end of depth loop"];
+        natural -> finish;
+        heur -> finish;
+        rronly -> finish;
+        infer -> netInf [dir=both, style=dashed];
+        infer -> film;
+        film -> finish;
+        finish -> boot [dir=both, style=dashed, label="if heuristic ends"];
+        finish -> back;
+        back -> accum;
+    }
+
+    start_sample -> reset;
+
+    nextband [label="more bands in this sample?", shape=diamond, fillcolor="#fff7b0"];
+    accum -> nextband;
+    nextband -> reset [label="yes"];
+
+    // ---------------------------------------------------------------
+    // Training (once per sample)
+    // ---------------------------------------------------------------
+    subgraph cluster_train {
+        label="Step 11-12: once per SAMPLE, after all bands  (NRCTrainAccumulatedRecords(), integrator.cpp)";
+        style="rounded,filled"; fillcolor="#fff4e8"; color="#cc8844"; fontsize=12;
+
+        budget [label="available records\nuse at most 65,536 (4 x 16,384)"];
+        oversample [label="--nrc-brightness-oversampling ?", shape=diamond, fillcolor="#fff7b0"];
+        bright  [label="bright records (target brightness >= 0.1)\nget guaranteed slots:\nmax(brightCount, used/800)\n+ random shuffle for the rest"];
+        plain   [label="plain uniform shuffle"];
+        gather  [label="gather on GPU into 4 batches"];
+        train   [label="nrc::NeuralRadianceCache::TrainN()  x 4\nnrc.cu -> tcnn trainer->training_step()\nloss: SpectralRelativeL2Loss\n(spectral_relative_l2.h)", shape=box3d, fillcolor="#d8f5d0"];
+        counter [label="++nrcSampleCounter\nnrcWarmedUp = counter >= nrcWarmupSamples"];
+        tileup  [label="NRCUpdateTrainingTile(available)\nmove tile size toward 65,536 records"];
+        debug   [label="--nrc-debug:\nbrightness-bucket accuracy table\nOUTPUT AFTER TRAIN", style="rounded,dashed"];
+
+        budget -> oversample;
+        oversample -> bright [label="on (default)"];
+        oversample -> plain  [label="=false"];
+        bright -> gather;
+        plain  -> gather;
+        gather -> train -> counter -> tileup;
+        train -> debug [style=dashed];
+    }
+
+    nextband -> budget [label="no"];
+
+    moresamples [label="more samples?", shape=diamond, fillcolor="#fff7b0"];
+    tileup -> moresamples;
+    moresamples -> start_sample [label="yes"];
+
+    final [label="NRCDumpPredictedImage()\n--nrc-output: first-hit prediction image", shape=oval, fillcolor="#eeeeee"];
+    moresamples -> final [label="no"];
+
+    // ---------------------------------------------------------------
+    // Cross links: how training feeds rendering
+    // ---------------------------------------------------------------
+    counter -> kind [style=dotted, color="#cc0000", constraint=false,
+                     label="nrcWarmedUp decides:\nrender paths stop + bootstrap on"];
+    netInf -> train [style=invis];
+}

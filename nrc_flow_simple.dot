@@ -1,0 +1,40 @@
+// Simplified NRC flow.
+// Render:  dot -Tsvg nrc_flow_simple.dot -o nrc_flow_simple.svg
+
+digraph NRC_simple {
+    rankdir=TB;
+    fontname="Helvetica";
+    node [fontname="Helvetica", fontsize=12, shape=box, style="rounded,filled", fillcolor="#ffffff"];
+    edge [fontname="Helvetica", fontsize=10];
+
+    cam   [label="1. Camera makes the ray\nGenerateCameraRays()", fillcolor="#eeeeee"];
+    bounce [label="2. Ray bounces\nEvaluateMaterialsAndBSDFs()"];
+    query [label="3. Light is blurry enough?\n(area spread)\n= QUERY VERTEX", shape=diamond, fillcolor="#fff7b0"];
+    kind  [label="Training path?", shape=diamond, fillcolor="#fff7b0"];
+
+    // render path
+    stop  [label="4a. STOP the path\nask the network later\nNRCInferenceForRenderPaths()", fillcolor="#d6ecff"];
+    net   [label="Network\nInference()", shape=box3d, fillcolor="#d8f5d0"];
+    pixel [label="Add  beta * q * R  to the pixel\nUpdateFilm()", fillcolor="#d6ecff"];
+
+    // training path
+    tail  [label="4b. KEEP GOING for real (suffix)\nup to 4 vertices", fillcolor="#ffe3c2"];
+    target [label="5. Walk backward to get answers\nNRCTrainingSuffixFinish()\nL = local + step * L_next", fillcolor="#ffe3c2"];
+    store [label="6. Collect examples\nNRCAccumulateTrainingRecords()", fillcolor="#ffe3c2"];
+    train [label="7. Teach the network (once per sample)\nNRCTrainAccumulatedRecords()\nTrainN() x 4", shape=box3d, fillcolor="#d8f5d0"];
+    adapt [label="8. Warmup check + tile size update\nNRCUpdateTrainingTile()"];
+
+    cam -> bounce -> query;
+    query -> bounce [label="no, bounce again"];
+    query -> kind   [label="yes"];
+
+    kind -> stop [label="no\n(most pixels)"];
+    stop -> net  [dir=both, style=dashed];
+    stop -> pixel;
+
+    kind -> tail [label="yes\n(few pixels)"];
+    tail -> target -> store -> train -> adapt;
+
+    train -> net [label="network gets smarter", style=dotted, color="#cc0000", constraint=false];
+    adapt -> cam [label="next sample", style=dashed, constraint=false];
+}
