@@ -1,0 +1,1 @@
+[1m[31mWarning[0m: ../pbrt-v4-scenes/crown/crown.pbrt:3:0: Output filename supplied on command line, "experiments/nrc_fifth/64SPP_Crown.exr" will override filename provided in scene description file, "crown.exr".

@@ -19,6 +19,54 @@
 
 namespace pbrt {
 
+// Muller et al. 2021 training-suffix cap (see integrator.h for the full
+// design). Declared here, at namespace scope, rather than as a
+// WavefrontPathIntegrator member, so that intersect.h's free function
+// RecordShadowRayResult -- which has no access to that class -- can compute
+// suffix-array offsets for the NEE contribution recorded in
+// ShadowRayWorkItem below.
+constexpr uint32_t kNRCMaxSuffixLen = 4;
+
+// nrcSuffixLocal is allocated with one extra slot per pixel beyond
+// kNRCMaxSuffixLen (index kNRCMaxSuffixLen itself, never used by ordinary
+// suffixes, whose slots only ever range over [0, kNRCMaxSuffixLen)). RR-only
+// ("unbiased") training suffixes -- see integrator.h -- reuse that single
+// reserved slot as a running accumulator for their entire (potentially much
+// longer than kNRCMaxSuffixLen) tail, instead of advancing through per-vertex
+// slots. ShadowRayWorkItem::nrcSuffixSlot is set to this same sentinel value
+// (kNRCMaxSuffixLen) for RR-only shadow rays, so RecordShadowRayResult
+// (intersect.h) needs no rrOnly-specific branch at all: it just always adds
+// into nrcSuffixLocal[pixelIndex*kNRCSuffixLocalStride + slot], and slot is
+// either an ordinary vertex index or this reserved accumulator index.
+constexpr uint32_t kNRCSuffixLocalStride = kNRCMaxSuffixLen + 1;
+
+// How far past maxDepth the GPU wavefront loop (integrator.cpp's
+// per-sample-band `for (wavefrontDepth = 0; true; ...)` loop) is allowed to
+// run so that an RR-only ("unbiased") training suffix -- see
+// nrcSuffixRROnly in integrator.h -- can actually run until Russian
+// roulette kills it, rather than being silently cut short.
+//
+// This is deliberately NOT the same constant as kNRCMaxSuffixLen: that one
+// bounds fixed-size per-vertex GPU storage (nrcSuffixInputs/Step/Target/...),
+// so growing it costs real, permanent GPU memory for every training path,
+// every sample, whether or not any path actually needs it. This constant
+// only bounds loop *iterations* -- an RR-only suffix's real vertices beyond
+// kNRCMaxSuffixLen are never given per-vertex storage at all (they fold
+// straight into nrcSuffixLocal's one reserved accumulator slot, see
+// kNRCSuffixLocalStride above), so extending this costs no extra memory,
+// only (cheap, mostly-empty-queue) extra wavefront-loop passes on the rare
+// samples whose RR-only tail actually runs that long.
+//
+// It's a safety net, not a target: ordinary Russian roulette survival
+// probability shrinks geometrically with path throughput, so in practice an
+// RR-only suffix terminates naturally almost always within a handful of
+// bounces past maxDepth. This cap only guards against the (basically
+// never, but not impossible) case of a path surviving RR unusually long,
+// so the wavefront loop still has a hard upper bound and the render can't
+// hang on a single pathological sample.
+constexpr int kNRCRROnlySuffixDepthCap = 4;
+
+
 // RaySamples Definition
 struct RaySamples {
     // RaySamples Public Members
@@ -169,6 +217,18 @@ struct ShadowRayWorkItem {
     SampledWavelengths lambda;
     SampledSpectrum Ld, r_u, r_l;
     int pixelIndex;
+    // Training-suffix NEE: suffix-parallel (beta=1) equivalent of Ld, added
+    // to nrcSuffixLocal[nrcSuffixSlot] by RecordShadowRayResult if the
+    // shadow ray is unoccluded. Zero (a harmless no-op add) when this
+    // vertex isn't part of an active, non-bootstrap training suffix, or for
+    // shadow rays spawned from medium/subsurface scattering (out of scope
+    // for the suffix mechanism). For an RR-only ("unbiased") suffix vertex,
+    // nrcSuffixLd is pre-scaled by that suffix's current nrcSuffixBeta at
+    // push time (surfscatter.cpp) and nrcSuffixSlot is set to the reserved
+    // sentinel value kNRCMaxSuffixLen, so it accumulates into the shared
+    // running-target slot instead of a per-vertex one.
+    SampledSpectrum nrcSuffixLd;
+    int nrcSuffixSlot;
 };
 
 // GetBSSRDFAndProbeRayWorkItem Definition
