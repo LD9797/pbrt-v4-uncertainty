@@ -397,6 +397,9 @@ class WavefrontPathIntegrator {
     nrc::NeuralRadianceCache *nrcCache = nullptr;
     int nrcSampleCounter = 0;
     float nrcLastLoss = 0.f;
+    // --nrc-metrics-csv: open (header already written) when enabled, else
+    // null. One row is appended per NRCTrainAccumulatedRecords() call.
+    FILE *nrcMetricsFile = nullptr;
     // False until nrcSampleCounter reaches Options->nrcWarmupSamples; while
     // false, nrcTerminateAndSubstitute (surfscatter.cpp) never fires, so
     // every path traces to completion for real and only trains the cache --

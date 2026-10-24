@@ -467,6 +467,14 @@ WavefrontPathIntegrator::WavefrontPathIntegrator(
                                                 Options->nrcConfigFile);
         LOG_VERBOSE("NRC: created cache batchSize=%d nParams=%zu", nrcBatchSize,
                     nrcCache->NumParams());
+        if (!Options->nrcMetricsCSV.empty()) {
+            nrcMetricsFile = fopen(Options->nrcMetricsCSV.c_str(), "w");
+            if (!nrcMetricsFile)
+                ErrorExit("%s: unable to open --nrc-metrics-csv file for writing.",
+                          Options->nrcMetricsCSV);
+            fprintf(nrcMetricsFile, "sample,records,mse,rel_mse,mae,nrc_loss\n");
+            fflush(nrcMetricsFile);
+        }
     }
 #endif  // PBRT_BUILD_NRC
 }
@@ -1843,6 +1851,22 @@ void WavefrontPathIntegrator::NRCTrainAccumulatedRecords() {
         double nrcBucketTargetSum[kNumNRCBrightnessBuckets] = {};
         uint64_t nrcBucketCount[kNumNRCBrightnessBuckets] = {};
 
+        // --nrc-metrics-csv: pure prediction error, measured on every batch
+        // BEFORE its own gradient step (each batch is disjoint from the
+        // others, so the network has never trained on the records it is
+        // scored on here -- this is generalization to fresh samples, not
+        // memorization). Accumulated across this sample's batches and written
+        // as one CSV row below. Prediction is max(0,q)*R, exactly what render
+        // substitution uses; target is the raw spectral Ls.
+        //   mse      mean over records*channels of (pred - target)^2
+        //   mae      mean over records*channels of |pred - target|
+        //   rel_mse  same as mse but each record divided by (Y_target^2+0.01),
+        //            Y_target = sum_c target_c * weight_c (photometric luminance)
+        //   nrc_loss the actual NRC training loss (spectral_relative_l2.h):
+        //            diff^2 / (Y_pred^2+0.01) with Y_pred from the unclamped q*R
+        double metSqErr = 0., metAbsErr = 0., metRelErr = 0., metLoss = 0.;
+        uint64_t metRecords = 0;
+
         for (uint32_t b = 0; b < batches; ++b) {
             uint32_t count = base + (b < remainder ? 1u : 0u);
             if (count == 0)
@@ -1903,6 +1927,36 @@ void WavefrontPathIntegrator::NRCTrainAccumulatedRecords() {
                                 size_t(padding) * (2 * kNRCOutputDims) * sizeof(float));
             }
 
+            if (nrcMetricsFile) {
+                // Score this (still unseen) batch with the current network.
+                cudaDeviceSynchronize();
+                nrcCache->InferenceN(slotInputs, nrcInferenceOutputs, trainBatch);
+                cudaDeviceSynchronize();
+                for (uint32_t j = 0; j < count; ++j) {
+                    const float *aux = slotAux + size_t(j) * (2 * kNRCOutputDims);
+                    const float *tgt = slotTargets + size_t(j) * kNRCOutputDims;
+                    const float *q = nrcInferenceOutputs + size_t(j) * kNRCOutputDims;
+                    double sq = 0., ab = 0., yT = 0., yP = 0., sqRaw = 0.;
+                    for (uint32_t c = 0; c < kNRCOutputDims; ++c) {
+                        double r = aux[c], w = aux[kNRCOutputDims + c];
+                        double pred = std::max(0.f, q[c]) * r;
+                        double diff = pred - tgt[c];
+                        sq += diff * diff;
+                        ab += std::abs(diff);
+                        yT += tgt[c] * w;
+                        double predRaw = double(q[c]) * r;
+                        yP += predRaw * w;
+                        double diffRaw = predRaw - tgt[c];
+                        sqRaw += diffRaw * diffRaw;
+                    }
+                    metSqErr += sq;
+                    metAbsErr += ab;
+                    metRelErr += sq / (yT * yT + 0.01);
+                    metLoss += sqRaw / (yP * yP + 0.01);
+                }
+                metRecords += count;
+            }
+
             nrcLastLoss =
                 nrcCache->TrainN(slotInputs, slotTargets, trainBatch, slotAux);
             if (Options->nrcDebug)
@@ -1911,6 +1965,17 @@ void WavefrontPathIntegrator::NRCTrainAccumulatedRecords() {
                         "trainBatch=%u loss=%.9g finite=%d\n",
                         nrcSampleCounter, b + 1, batches, available, used, count, trainBatch,
                         nrcLastLoss, std::isfinite(nrcLastLoss) ? 1 : 0);
+        }
+
+        if (nrcMetricsFile && metRecords > 0) {
+            // Per-element means: (records * channels) for squared/absolute
+            // error, records for the per-record relative terms (already
+            // averaged over channels via the shared Y denominator).
+            double nElem = double(metRecords) * kNRCOutputDims;
+            fprintf(nrcMetricsFile, "%d,%llu,%.9g,%.9g,%.9g,%.9g\n", nrcSampleCounter,
+                    (unsigned long long)metRecords, metSqErr / nElem,
+                    metRelErr / nElem, metAbsErr / nElem, metLoss / nElem);
+            fflush(nrcMetricsFile);
         }
 
         if (Options->nrcDebug) {

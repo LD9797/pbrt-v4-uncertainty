@@ -58,6 +58,7 @@ struct PBRTOptions : BasicPBRTOptions {
     int nrcWarmupSamples = 16;         // --nrc-warmup-samples: scanline passes trained before render-time substitution engages
     std::string nrcConfigFile;         // --nrc-config: path to tcnn JSON config (empty = built-in default)
     std::string nrcOutputFile; // --nrc-output: save path for the NRC predicted image; empty = diagnostic image disabled entirely
+    std::string nrcMetricsCSV; // --nrc-metrics-csv: CSV path for pre-training NRC prediction metrics (one row per sample); empty = disabled
     bool enableNRC = false;            // --enable-nrc: opt-in to the Neural Radiance Cache side-computation
     bool nrcDebug = false;              // --nrc-debug: enable verbose per-pass NRC diagnostic logging to stderr
     bool nrcBrightnessOversampling = true;  // --nrc-brightness-oversampling=<bool>: on = force a small fraction of each training batch to be rare bright (targetBrightness >= 0.1) records; off = original plain uniform shuffle selection
