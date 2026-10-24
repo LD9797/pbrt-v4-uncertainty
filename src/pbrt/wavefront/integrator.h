@@ -403,6 +403,11 @@ class WavefrontPathIntegrator {
     // avoids baking an untrained network's predictions permanently into the
     // progressively-accumulated film.
     bool nrcWarmedUp = false;
+    // --nrc-zero-inputs ablation: inclusive input-index range to zero
+    // (-1 = none). Copied from Options so GPU kernels (surfscatter.cpp) can
+    // read it like the other nrc* members.
+    int nrcZeroFirst = -1;
+    int nrcZeroLast = -1;
 
     // ---- Training-suffix self-training (Muller et al. Sec. 3 / Fig. 4) ----
     // A training path never terminates at its render-query vertex (it never

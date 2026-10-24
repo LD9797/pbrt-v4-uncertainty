@@ -826,6 +826,11 @@ void WavefrontPathIntegrator::EvaluateMaterialAndBSDF(MaterialEvalQueue *evalQue
                 // Padding, constant 1 (paper pads to 64 for tile alignment).
                 row[47 + NSpectrumSamples] = 1.f;
                 row[48 + NSpectrumSamples] = 1.f;
+                // --nrc-zero-inputs ablation: zero raw inputs [first, last].
+                if (nrcZeroFirst >= 0)
+                    for (int i = nrcZeroFirst;
+                         i <= nrcZeroLast && i < int(kNRCInputDims); ++i)
+                        row[i] = 0.f;
                 if (nrcTerminateAndSubstitute) {
                     nrcRenderQuery[w.pixelIndex] = 1;
                     nrcRenderQueryDepth[w.pixelIndex] = uint8_t(w.depth);

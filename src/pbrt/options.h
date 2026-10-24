@@ -61,6 +61,9 @@ struct PBRTOptions : BasicPBRTOptions {
     bool enableNRC = false;            // --enable-nrc: opt-in to the Neural Radiance Cache side-computation
     bool nrcDebug = false;              // --nrc-debug: enable verbose per-pass NRC diagnostic logging to stderr
     bool nrcBrightnessOversampling = true;  // --nrc-brightness-oversampling=<bool>: on = force a small fraction of each training batch to be rare bright (targetBrightness >= 0.1) records; off = original plain uniform shuffle selection
+    int nrcZeroFirst = -1;              // --nrc-zero-inputs <first[,last]>: ablation, zero NRC raw input indices [first, last] (inclusive); -1 = none
+    int nrcZeroLast = -1;
+    bool nrcSkipSubstitution = false;   // --nrc-skip-substitution: ablation, render paths stopped at the query vertex add nothing instead of the network's prediction
 
     std::string ToString() const;
 };

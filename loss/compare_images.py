@@ -80,21 +80,41 @@ def compute_metrics(reference: np.ndarray, test: np.ndarray) -> dict:
     mae = float(np.mean(np.abs(diff)))
     rel_mse = float(np.mean(diff ** 2 / (reference ** 2 + RELMSE_EPS)))
 
-    data_range = float(max(reference.max(), test.max()) - min(reference.min(), test.min()))
+    data_range = float(reference.max() - reference.min())
     data_range = data_range if data_range > 0 else 1.0
-    psnr = float("inf") if mse == 0 else 20 * np.log10(data_range) - 10 * np.log10(mse)
-    ssim = float(structural_similarity(reference, test, channel_axis=2, data_range=data_range))
+
+    psnr = (
+        float("inf")
+        if mse == 0
+        else 20 * np.log10(data_range) - 10 * np.log10(mse)
+    )
+
+    ssim = float(
+        structural_similarity(
+            reference,
+            test,
+            channel_axis=2,
+            data_range=data_range
+        )
+    )
 
     return {"MSE": mse, "RMSE": rmse, "MAE": mae, "relMSE": rel_mse,
             "PSNR (dB)": psnr, "SSIM": ssim}
 
 
+def append_result_to_file(result_file: str, lines: list):
+    with open(result_file, "a") as f:
+        f.write("\n".join(lines) + "\n")
+
+
 def main() -> None:
-    if len(sys.argv) == 3:
+    if len(sys.argv) == 4:
         ref_path, test_path = sys.argv[1], sys.argv[2]
+        result_file = sys.argv[3]
     elif len(sys.argv) == 1:
         ref_path = pick_file("Select the reference image (e.g. baseline)")
         test_path = pick_file("Select the test image (e.g. NRC prediction)")
+        result_file = pick_file("Select the result file to save metrics")
     else:
         sys.exit("Usage: compare_images.py [reference_image test_image]")
 
@@ -111,7 +131,8 @@ def main() -> None:
     lines = [f"Reference: {ref_path}", f"Test:      {test_path}",
              f"Resolution: {reference.shape[1]}x{reference.shape[0]}", ""]
     lines += [f"{name:<10} {value:.6f}" for name, value in metrics.items()]
-    show_result("Image Comparison Results", "\n".join(lines))
+    # show_result("Image Comparison Results", "\n".join(lines))
+    append_result_to_file(result_file, lines)
 
 
 if __name__ == "__main__":

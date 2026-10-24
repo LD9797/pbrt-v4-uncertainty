@@ -313,6 +313,8 @@ WavefrontPathIntegrator::WavefrontPathIntegrator(
     // them without explicit transfers. Sized to a tcnn-compatible padding of
     // the per-pass pixel batch.
     if (Options->useGPU && Options->enableNRC) {
+        nrcZeroFirst = Options->nrcZeroFirst;
+        nrcZeroLast = Options->nrcZeroLast;
         nrcBatchSize = nrc::NeuralRadianceCache::RoundUpBatch(maxQueueSize);
         nrcSceneBounds = aggregate->Bounds();
         cudaMallocManaged(&nrcInputs,
@@ -2328,7 +2330,10 @@ void WavefrontPathIntegrator::NRCInferenceForRenderPaths() {
     // wasted work with no consumer for its output.
     if (!nrcCache || !nrcWarmedUp)
         return;
-    
+    // --nrc-skip-substitution ablation: stopped render paths add nothing.
+    if (Options->nrcSkipSubstitution)
+        return;
+
     // Ensure surfscatter.cpp's feature-row and snapshot writes for this pass
     // are visible before tcnn reads nrcInputs.
     // cudaDeviceSynchronize(); TEMP removal

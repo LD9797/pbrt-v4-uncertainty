@@ -73,6 +73,14 @@ Rendering options:
                                  Note the '=' is required to pass false; a bare
                                  --nrc-brightness-oversampling always sets it to true.
                                  (Default: enabled)
+  --nrc-zero-inputs <first[,last]>
+                                Ablation: set the raw NRC network inputs with indices
+                                first..last (inclusive, 0-52) to zero. A single index
+                                zeroes just that input. 0,52 zeroes everything.
+                                (Default: disabled)
+  --nrc-skip-substitution       Ablation: render paths stopped at the query vertex add
+                                nothing instead of the network's prediction.
+                                (Default: disabled)
   --nthreads <num>              Use specified number of threads for rendering.
   --outfile <filename>          Write the final image to the given filename.
   --pixel <x,y>                 Render just the specified pixel.
@@ -139,7 +147,7 @@ int main(int argc, char *argv[]) {
             exit(1);
         };
 
-        std::string cropWindow, pixelBounds, pixel, pixelMaterial;
+        std::string cropWindow, pixelBounds, pixel, pixelMaterial, nrcZeroInputs;
         if (ParseArg(&iter, args.end(), "cropwindow", &cropWindow, onError)) {
             std::vector<Float> c = SplitStringToFloats(cropWindow, ',');
             if (c.size() != 4) {
@@ -170,6 +178,18 @@ int main(int argc, char *argv[]) {
                 return 1;
             }
             options.pixelMaterial = Point2i(p[0], p[1]);
+        } else if (ParseArg(&iter, args.end(), "nrc-zero-inputs", &nrcZeroInputs,
+                            onError)) {
+            std::vector<int> r = SplitStringToInts(nrcZeroInputs, ',');
+            if (r.size() == 1)
+                r.push_back(r[0]);
+            if (r.size() != 2 || r[0] < 0 || r[1] < r[0]) {
+                usage("--nrc-zero-inputs expects <first> or <first,last> with "
+                      "0 <= first <= last");
+                return 1;
+            }
+            options.nrcZeroFirst = r[0];
+            options.nrcZeroLast = r[1];
         } else if (
 #ifdef PBRT_BUILD_GPU_RENDERER
             ParseArg(&iter, args.end(), "gpu", &options.useGPU, onError) ||
@@ -209,6 +229,8 @@ int main(int argc, char *argv[]) {
             ParseArg(&iter, args.end(), "nrc-debug", &options.nrcDebug, onError) ||
             ParseArg(&iter, args.end(), "nrc-brightness-oversampling",
                      &options.nrcBrightnessOversampling, onError) ||
+            ParseArg(&iter, args.end(), "nrc-skip-substitution",
+                     &options.nrcSkipSubstitution, onError) ||
             ParseArg(&iter, args.end(), "nthreads", &options.nThreads, onError) ||
             ParseArg(&iter, args.end(), "outfile", &options.imageFile, onError) ||
             ParseArg(&iter, args.end(), "pixelstats", &options.recordPixelStatistics,
