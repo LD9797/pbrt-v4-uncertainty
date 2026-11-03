@@ -64,6 +64,8 @@ Rendering options:
   --nrc-config <path>           Path to tcnn JSON config file for the NRC network.
                                 (Default: built-in 64-wide 3-layer MLP)
   --nrc-output <path>           Save path for the NRC predicted image. (Default: disabled -- no diagnostic image written)
+    --nrc-radiance-domain <mode>  NRC target/prediction domain: "linear" (default)
+                                                                or "log" (log1p targets, expm1 decode at inference).
   --enable-nrc                  Enable the Neural Radiance Cache side-computation. (Default: disabled)
   --nrc-debug                   Enable verbose per-pass NRC diagnostic logging to stderr. (Default: disabled)
   --nrc-brightness-oversampling=<bool>
@@ -139,7 +141,7 @@ int main(int argc, char *argv[]) {
             exit(1);
         };
 
-        std::string cropWindow, pixelBounds, pixel, pixelMaterial;
+        std::string cropWindow, pixelBounds, pixel, pixelMaterial, nrcRadianceDomain;
         if (ParseArg(&iter, args.end(), "cropwindow", &cropWindow, onError)) {
             std::vector<Float> c = SplitStringToFloats(cropWindow, ',');
             if (c.size() != 4) {
@@ -170,6 +172,16 @@ int main(int argc, char *argv[]) {
                 return 1;
             }
             options.pixelMaterial = Point2i(p[0], p[1]);
+        } else if (ParseArg(&iter, args.end(), "nrc-radiance-domain",
+                            &nrcRadianceDomain, onError)) {
+            if (nrcRadianceDomain == "linear")
+                options.nrcLogRadiance = false;
+            else if (nrcRadianceDomain == "log")
+                options.nrcLogRadiance = true;
+            else {
+                usage("--nrc-radiance-domain must be either 'linear' or 'log'");
+                return 1;
+            }
         } else if (
 #ifdef PBRT_BUILD_GPU_RENDERER
             ParseArg(&iter, args.end(), "gpu", &options.useGPU, onError) ||

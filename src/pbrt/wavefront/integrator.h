@@ -403,6 +403,9 @@ class WavefrontPathIntegrator {
     // avoids baking an untrained network's predictions permanently into the
     // progressively-accumulated film.
     bool nrcWarmedUp = false;
+    // Copy of --nrc-radiance-domain so GPU lambdas can branch without
+    // touching Options directly.
+    bool nrcLogRadianceTargets = false;
 
     // ---- Training-suffix self-training (Muller et al. Sec. 3 / Fig. 4) ----
     // A training path never terminates at its render-query vertex (it never

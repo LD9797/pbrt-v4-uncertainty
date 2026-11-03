@@ -313,6 +313,7 @@ WavefrontPathIntegrator::WavefrontPathIntegrator(
     // them without explicit transfers. Sized to a tcnn-compatible padding of
     // the per-pass pixel batch.
     if (Options->useGPU && Options->enableNRC) {
+        nrcLogRadianceTargets = Options->nrcLogRadiance;
         nrcBatchSize = nrc::NeuralRadianceCache::RoundUpBatch(maxQueueSize);
         nrcSceneBounds = aggregate->Bounds();
         cudaMallocManaged(&nrcInputs,
@@ -1585,6 +1586,7 @@ void WavefrontPathIntegrator::NRCAccumulateTrainingRecords() {
     float *compactTargets = nrcCompactTargets;
     float *compactAux = nrcCompactAux;
     const uint32_t batch = nrcBatchSize;
+    const bool useLogTargets = nrcLogRadianceTargets;
 
     // Compact this band's valid first-hit records into a contiguous prefix
     // of nrcCompactInputs/Targets/Aux, appending after whatever earlier
@@ -1616,14 +1618,15 @@ void WavefrontPathIntegrator::NRCAccumulateTrainingRecords() {
             const float *wSrc = channelWeight + size_t(i) * NSpectrumSamples;
             float *dstAux = compactAux + size_t(dst) * (2 * kNRCOutputDims);
             for (uint32_t c = 0; c < kNRCOutputDims; ++c) {
-                dst_[c] = std::max(0.f, src[c]);
+                float linearTarget = std::max(0.f, src[c]);
+                dst_[c] = useLogTargets ? std::log(1.f + linearTarget) : linearTarget;
                 // Same 1e-3 floor NRCTrainAccumulatedRecords' render substitution and
                 // NRCTrainingSuffixFinish's bootstrap seed apply to reflectance
                 // before multiplying it by the network's raw output -- training
                 // must reconstruct L_hat_s = R*q with the exact same R contract
                 // those two use, or the loss trains against a value inference
                 // never actually reproduces whenever R < 1e-3.
-                dstAux[c] = std::max(rSrc[c], 1e-3f);
+                dstAux[c] = useLogTargets ? 1.f : std::max(rSrc[c], 1e-3f);
                 dstAux[kNRCOutputDims + c] = wSrc[c];
             }
         });
@@ -1656,12 +1659,11 @@ void WavefrontPathIntegrator::NRCAccumulateTrainingRecords() {
                 for (uint32_t c = 0; c < kNRCInputDims; ++c)
                     dstIn[c] = srcIn[c];
 
-                // Target stays raw Ls (no reflectance division): Muller et
-                // al.'s relative loss (Eq. 5) is defined on Ls and the actual
-                // radiance prediction L_hat_s = R*q, not on the raw network
-                // output q alone -- SpectralRelativeL2Loss (see
-                // spectral_relative_l2.h) does the R multiply internally,
-                // using the reflectance/weight aux below.
+                // Target domain is selected by --nrc-radiance-domain:
+                // linear -> raw Ls, log -> log1p(Ls). In both cases the
+                // same aux packing is used; log mode sets reflectance to 1
+                // so the loss compares the network output directly in the
+                // transformed domain.
                 const float *src =
                     suffixTarget + (size_t(i) * kNRCMaxSuffixLen + s) * kNRCOutputDims;
                 float *dst_ = compactTargets + size_t(dst) * kNRCOutputDims;
@@ -1672,11 +1674,12 @@ void WavefrontPathIntegrator::NRCAccumulateTrainingRecords() {
                         (size_t(i) * kNRCMaxSuffixLen + s) * NSpectrumSamples;
                 float *dstAux = compactAux + size_t(dst) * (2 * kNRCOutputDims);
                 for (uint32_t c = 0; c < kNRCOutputDims; ++c) {
-                    dst_[c] = std::max(0.f, src[c]);
+                    float linearTarget = std::max(0.f, src[c]);
+                    dst_[c] = useLogTargets ? std::log(1.f + linearTarget) : linearTarget;
                     // Same 1e-3 floor as the non-suffix branch above (and as
                     // render substitution/bootstrap) -- keeps R's contract
                     // identical everywhere it's used to reconstruct L_hat_s = R*q.
-                    dstAux[c] = std::max(refl[c], 1e-3f);
+                    dstAux[c] = useLogTargets ? 1.f : std::max(refl[c], 1e-3f);
                     dstAux[kNRCOutputDims + c] = chanW[c];
                 }
             }
@@ -1837,6 +1840,7 @@ void WavefrontPathIntegrator::NRCTrainAccumulatedRecords() {
             0.1f, 1.f, 5.f, 20.f, Infinity};
         constexpr const char *kNRCBrightnessBucketLabel[kNumNRCBrightnessBuckets] = {
             "0 - 0.1", "0.1 - 1", "1 - 5", "5 - 20", "20+"};
+        const bool useLogTargets = nrcLogRadianceTargets;
         double nrcBucketPredSum[kNumNRCBrightnessBuckets] = {};
         double nrcBucketTargetSum[kNumNRCBrightnessBuckets] = {};
         uint64_t nrcBucketCount[kNumNRCBrightnessBuckets] = {};
@@ -1949,11 +1953,15 @@ void WavefrontPathIntegrator::NRCTrainAccumulatedRecords() {
                     float targetBrightness = 0.f, predictedBrightness = 0.f;
                     for (uint32_t c = 0; c < kNRCOutputDims; ++c) {
                         float target = slotTargets[size_t(j) * kNRCOutputDims + c];
+                        if (useLogTargets)
+                            target = std::exp(target) - 1.f;
                         float reflectance = aux[c];
                         float weight = aux[kNRCOutputDims + c];
                         float networkOutput =
                             nrcInferenceOutputs[size_t(j) * kNRCOutputDims + c];
-                        float predicted = std::max(0.f, networkOutput) * reflectance;
+                        float predicted = useLogTargets
+                                              ? (std::exp(std::max(0.f, networkOutput)) - 1.f)
+                                              : (std::max(0.f, networkOutput) * reflectance);
 
                         targetBrightness += target * weight;
                         predictedBrightness += predicted * weight;
@@ -2158,14 +2166,10 @@ void WavefrontPathIntegrator::NRCTrainingSuffixFinish() {
     // the render-query vertex (slot 0), seeding the recursion with the
     // network's own bootstrap prediction (heuristic/cap end) or zero
     // (natural end -- the last vertex's own local contribution needs no
-    // continuation). Everything here is spectral: the network's bootstrap
-    // output is kNRCOutputDims == NSpectrumSamples raw radiance samples at
-    // this suffix's own lambda (see the input row's wavelength dims in
-    // surfscatter.cpp), so it's used directly as Lnext with no RGB
-    // round-trip. `local`/`step` are likewise already spectral. The target
-    // written for each slot is the raw spectral Ls -- RGB conversion never
-    // happens here at all; it happens exactly once, where PBRT's film
-    // normally converts a final spectral path contribution to a pixel.
+    // continuation). Everything here is spectral. In linear mode, bootstrap
+    // decode is reflectance * max(0,q); in log mode, exp(max(0,q))-1. The
+    // backward recursion itself remains in linear radiance; the optional log
+    // transform is applied later, when records are compacted for training.
     {
         const uint8_t *terminatedByHeuristic = nrcSuffixTerminatedByHeuristic;
         const uint8_t *suffixLen = nrcSuffixLen;
@@ -2180,6 +2184,7 @@ void WavefrontPathIntegrator::NRCTrainingSuffixFinish() {
         const uint32_t localStride = kNRCSuffixLocalStride;
         const uint32_t batch = nrcBatchSize;
         const bool warmedUp = nrcWarmedUp;
+        const bool useLogTargets = nrcLogRadianceTargets;
         ParallelFor(
             "NRC suffix backward propagation", batch, PBRT_CPU_GPU_LAMBDA(int i) {
                 uint32_t m = suffixLen[i];
@@ -2214,11 +2219,16 @@ void WavefrontPathIntegrator::NRCTrainingSuffixFinish() {
                 if (terminatedByHeuristic[i] && warmedUp) {
                     uint32_t bi = bootstrapIndex[i];
                     for (int c = 0; c < NSpectrumSamples; ++c) {
-                        float refl = std::max(
-                            reflectance[(size_t(i) * cap + m) * NSpectrumSamples + c],
-                            1e-3f);
-                        Lnext[c] = refl * std::max(
-                            0.f, bootstrapOutputs[size_t(bi) * kNRCOutputDims + c]);
+                        float q = std::max(0.f,
+                                           bootstrapOutputs[size_t(bi) * kNRCOutputDims + c]);
+                        if (useLogTargets) {
+                            Lnext[c] = std::exp(q) - 1.f;
+                        } else {
+                            float refl = std::max(
+                                reflectance[(size_t(i) * cap + m) * NSpectrumSamples + c],
+                                1e-3f);
+                            Lnext[c] = refl * q;
+                        }
                     }
                 }
                 for (int s = int(m) - 1; s >= 0; --s) {
@@ -2343,6 +2353,7 @@ void WavefrontPathIntegrator::NRCInferenceForRenderPaths() {
     const float *outputs = nrcInferenceOutputs;
     const float *snapshotBeta = nrcSnapshotBeta;
     const float *reflectance = nrcReflectance;
+    const bool useLogTargets = nrcLogRadianceTargets;
     auto *psState = &pixelSampleState;
     const uint32_t batch = nrcBatchSize;
     ParallelFor(
@@ -2367,8 +2378,12 @@ void WavefrontPathIntegrator::NRCInferenceForRenderPaths() {
             for (int c = 0; c < NSpectrumSamples; ++c) {
                 float networkValue =
                     std::max(0.f, outputs[i * (int)kNRCOutputDims + c]);
-                float r = std::max(reflectance[i * NSpectrumSamples + c], 1e-3f);
-                predicted[c] = networkValue * r;
+                if (useLogTargets) {
+                    predicted[c] = std::exp(networkValue) - 1.f;
+                } else {
+                    float r = std::max(reflectance[i * NSpectrumSamples + c], 1e-3f);
+                    predicted[c] = networkValue * r;
+                }
             }
             SampledSpectrum beta;
             for (int c = 0; c < NSpectrumSamples; ++c)
