@@ -1580,7 +1580,6 @@ void WavefrontPathIntegrator::NRCAccumulateTrainingRecords() {
     const uint8_t *valid = nrcValid;
     const float *inputs = nrcInputs;
     const float *targets = nrcTargets;
-    const float *reflectance = nrcReflectance;
     const float *channelWeight = nrcChannelWeight;
     float *compactInputs = nrcCompactInputs;
     float *compactTargets = nrcCompactTargets;
@@ -1614,19 +1613,12 @@ void WavefrontPathIntegrator::NRCAccumulateTrainingRecords() {
 
             const float *src = targets + size_t(i) * kNRCOutputDims;
             float *dst_ = compactTargets + size_t(dst) * kNRCOutputDims;
-            const float *rSrc = reflectance + size_t(i) * NSpectrumSamples;
             const float *wSrc = channelWeight + size_t(i) * NSpectrumSamples;
             float *dstAux = compactAux + size_t(dst) * (2 * kNRCOutputDims);
             for (uint32_t c = 0; c < kNRCOutputDims; ++c) {
                 float linearTarget = std::max(0.f, src[c]);
                 dst_[c] = useLogTargets ? std::log(1.f + linearTarget) : linearTarget;
-                // Same 1e-3 floor NRCTrainAccumulatedRecords' render substitution and
-                // NRCTrainingSuffixFinish's bootstrap seed apply to reflectance
-                // before multiplying it by the network's raw output -- training
-                // must reconstruct L_hat_s = R*q with the exact same R contract
-                // those two use, or the loss trains against a value inference
-                // never actually reproduces whenever R < 1e-3.
-                dstAux[c] = useLogTargets ? 1.f : std::max(rSrc[c], 1e-3f);
+                dstAux[c] = 1.f;
                 dstAux[kNRCOutputDims + c] = wSrc[c];
             }
         });
@@ -1637,7 +1629,6 @@ void WavefrontPathIntegrator::NRCAccumulateTrainingRecords() {
     const uint8_t *suffixLen = nrcSuffixLen;
     const float *suffixInputs = nrcSuffixInputs;
     const float *suffixTarget = nrcSuffixTarget;
-    const float *suffixReflectance = nrcSuffixReflectance;
     const float *suffixChannelWeight = nrcSuffixChannelWeight;
 
     ParallelFor(
@@ -1667,8 +1658,6 @@ void WavefrontPathIntegrator::NRCAccumulateTrainingRecords() {
                 const float *src =
                     suffixTarget + (size_t(i) * kNRCMaxSuffixLen + s) * kNRCOutputDims;
                 float *dst_ = compactTargets + size_t(dst) * kNRCOutputDims;
-                const float *refl =
-                    suffixReflectance + (size_t(i) * kNRCMaxSuffixLen + s) * NSpectrumSamples;
                 const float *chanW =
                     suffixChannelWeight +
                         (size_t(i) * kNRCMaxSuffixLen + s) * NSpectrumSamples;
@@ -1676,10 +1665,7 @@ void WavefrontPathIntegrator::NRCAccumulateTrainingRecords() {
                 for (uint32_t c = 0; c < kNRCOutputDims; ++c) {
                     float linearTarget = std::max(0.f, src[c]);
                     dst_[c] = useLogTargets ? std::log(1.f + linearTarget) : linearTarget;
-                    // Same 1e-3 floor as the non-suffix branch above (and as
-                    // render substitution/bootstrap) -- keeps R's contract
-                    // identical everywhere it's used to reconstruct L_hat_s = R*q.
-                    dstAux[c] = useLogTargets ? 1.f : std::max(refl[c], 1e-3f);
+                    dstAux[c] = 1.f;
                     dstAux[kNRCOutputDims + c] = chanW[c];
                 }
             }
@@ -1762,8 +1748,11 @@ void WavefrontPathIntegrator::NRCTrainAccumulatedRecords() {
                 float targetBrightness = 0.f;
 
                 for (uint32_t c = 0; c < kNRCOutputDims; ++c) {
+                    float linearTarget =
+                        useLogTargets ? std::exp(target[c]) - 1.f
+                                      : target[c];
                     float weight = aux[kNRCOutputDims + c];
-                    targetBrightness += target[c] * weight;
+                    targetBrightness += linearTarget * weight;
                 }
 
                 if (targetBrightness >= 0.1f)
@@ -2179,7 +2168,6 @@ void WavefrontPathIntegrator::NRCTrainingSuffixFinish() {
         float *target = nrcSuffixTarget;
         const float *bootstrapOutputs = nrcInferenceOutputs;
         const uint32_t *bootstrapIndex = nrcSuffixBootstrapIndex;
-        const float *reflectance = nrcSuffixReflectance;
         const uint32_t cap = kNRCMaxSuffixLen;
         const uint32_t localStride = kNRCSuffixLocalStride;
         const uint32_t batch = nrcBatchSize;
@@ -2221,14 +2209,10 @@ void WavefrontPathIntegrator::NRCTrainingSuffixFinish() {
                     for (int c = 0; c < NSpectrumSamples; ++c) {
                         float q = std::max(0.f,
                                            bootstrapOutputs[size_t(bi) * kNRCOutputDims + c]);
-                        if (useLogTargets) {
+                        if (useLogTargets)
                             Lnext[c] = std::exp(q) - 1.f;
-                        } else {
-                            float refl = std::max(
-                                reflectance[(size_t(i) * cap + m) * NSpectrumSamples + c],
-                                1e-3f);
-                            Lnext[c] = refl * q;
-                        }
+                        else
+                            Lnext[c] = q;
                     }
                 }
                 for (int s = int(m) - 1; s >= 0; --s) {
@@ -2352,7 +2336,6 @@ void WavefrontPathIntegrator::NRCInferenceForRenderPaths() {
     const uint8_t *renderQuery = nrcRenderQuery;
     const float *outputs = nrcInferenceOutputs;
     const float *snapshotBeta = nrcSnapshotBeta;
-    const float *reflectance = nrcReflectance;
     const bool useLogTargets = nrcLogRadianceTargets;
     auto *psState = &pixelSampleState;
     const uint32_t batch = nrcBatchSize;
@@ -2378,12 +2361,10 @@ void WavefrontPathIntegrator::NRCInferenceForRenderPaths() {
             for (int c = 0; c < NSpectrumSamples; ++c) {
                 float networkValue =
                     std::max(0.f, outputs[i * (int)kNRCOutputDims + c]);
-                if (useLogTargets) {
+                if (useLogTargets)
                     predicted[c] = std::exp(networkValue) - 1.f;
-                } else {
-                    float r = std::max(reflectance[i * NSpectrumSamples + c], 1e-3f);
-                    predicted[c] = networkValue * r;
-                }
+                else
+                    predicted[c] = networkValue;
             }
             SampledSpectrum beta;
             for (int c = 0; c < NSpectrumSamples; ++c)
